@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import google.auth
+from dotenv import load_dotenv
 from google.adk.agents import Agent
 from google.adk.apps import App
 from google.adk.models import Gemini
@@ -37,21 +38,25 @@ from google.auth.exceptions import DefaultCredentialsError
 from google.genai import types
 from pydantic import BaseModel, Field
 
-# Preserve the generated Google Cloud/Vertex configuration, but make imports
-# work on a laptop that does not yet have ADC configured.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+INPUT_DIR = REPO_ROOT / "input"
+OUTPUT_DIR = REPO_ROOT / "output"
+
+# Load the same root .env used by `make playground`/ADK, and let it win over any
+# stale shell values. This keeps the generated playground flow working without a
+# Gemini API key when GOOGLE_GENAI_USE_VERTEXAI=True is configured in .env.
+load_dotenv(REPO_ROOT / ".env", override=True)
+
 try:
     _, project_id = google.auth.default()
 except DefaultCredentialsError:
     project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "cloudbridge-local")
 
-os.environ.setdefault("GOOGLE_CLOUD_PROJECT", project_id)
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", project_id or "cloudbridge-local")
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "global")
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
 
 MODEL_NAME = os.getenv("CLOUDBRIDGE_MODEL", "gemini-3-flash-preview")
-REPO_ROOT = Path(__file__).resolve().parent.parent
-INPUT_DIR = REPO_ROOT / "input"
-OUTPUT_DIR = REPO_ROOT / "output"
 
 SUPPORTED_TYPES: dict[str, str] = {
     "AWS::EC2::VPC": "google_compute_network",
