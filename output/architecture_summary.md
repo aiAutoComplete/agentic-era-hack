@@ -24,6 +24,10 @@ It maps supported AWS resources to Google Cloud equivalents for review.
 
 - Unsupported for MVP: AppDbSubnetGroup (AWS::RDS::DBSubnetGroup)
 
+## AWS to GCP visual flow
+
+See `aws-to-gcp-ascii-flow.md` for the ASCII side-by-side conversion diagram showing what existed in AWS and the corresponding GCP Terraform resources.
+
 ## Review notes
 
 - Validate networking, routing, and private service access before applying.
