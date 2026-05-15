@@ -12,19 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from google.adk.workflow import Workflow
+from google.adk.agents import SequentialAgent
 
 from app.agent import app, root_agent, specialist_agents
 
 
-def test_cloudbridge_graph_workflow_imports() -> None:
-    """The ADK app should expose the graph workflow without requiring live ADC."""
+def test_cloudbridge_pipeline_imports() -> None:
+    """The ADK app should expose the simple pipeline without requiring live ADC."""
     assert app.name == "app"
-    assert isinstance(root_agent, Workflow)
+    assert isinstance(root_agent, SequentialAgent)
     assert root_agent.name == "cloudbridge_architect"
-    assert root_agent.graph is not None
+    assert len(root_agent.sub_agents) == 4
 
 
-def test_cloudbridge_agent_is_registered() -> None:
+def test_cloudbridge_pipeline_agents_are_registered() -> None:
     names = {agent.name for agent in specialist_agents}
-    assert names == {"cloudbridge_architect_agent"}
+    assert names == {
+        "source_loader",
+        "translator",
+        "terraform_writer",
+        "compliance_reviewer",
+    }

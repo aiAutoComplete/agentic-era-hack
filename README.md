@@ -81,17 +81,16 @@ output/
 The main implementation is split across:
 
 ```text
-app/agent.py              # simple ADK 2 graph workflow + CloudBridge architect agent
-app/cloudbridge_tools.py  # small safe tools used by the agent
+app/agent.py              # simple ADK SequentialAgent pipeline
+app/cloudbridge_tools.py  # safe file helper + deterministic test helpers
 app/parser.py             # CloudFormation parser
 app/terraform_gen.py      # starter Terraform generation
 app/compliance.py         # explainable compliance checks
 ```
 
-CloudBridge uses ADK 2 graph workflows, but the graph is intentionally simple:
-`cloudbridge_architect` runs one capable `cloudbridge_architect_agent`. The agent
-uses tools for safe file access, CloudFormation parsing, conversion bundle
-creation, compliance review, and human-approved file writes.
+CloudBridge uses a simple ADK `SequentialAgent` pipeline inspired by the
+hackathon scaffold: load source, translate architecture, write Terraform, review
+compliance. The only live tool in the agent path is safe project file reading.
 
 ---
 
@@ -101,33 +100,30 @@ creation, compliance review, and human-approved file writes.
 User request
     │
     ▼
-cloudbridge_architect  (ADK 2 Workflow graph)
+cloudbridge_architect  (SequentialAgent)
     │
-    ▼
-cloudbridge_architect_agent
+    ├── source_loader        # reads input/sample*.yaml
     │
-    ├── list/read project files
-    ├── parse/explain CloudFormation
-    ├── map AWS resources to Google Cloud
-    ├── generate starter Terraform bundle
-    ├── review compliance/security findings
-    └── ask approve / revise / cancel before writes
+    ├── translator           # maps AWS resources to Google Cloud
+    │
+    ├── terraform_writer     # emits main.tf, variables.tf, iam.tf, outputs.tf
+    │
+    └── compliance_reviewer  # reports PASS/FAIL findings and fixes
 ```
 
-Tooling is intentionally small:
+Runtime tooling is intentionally tiny:
 
 - `list_project_files(scope)`
 - `read_project_file(path)` with safe path checks
-- `parse_cloudformation(template_or_path)`
-- `build_conversion_bundle(template_or_path)`
-- `run_compliance_review(template_or_path, terraform_text=None)`
-- `write_project_files_after_approval(files, approval)`
+
+The deterministic parser/generator/compliance helpers remain in the repo for
+unit tests and fallback scripts, but the playground path is agent-led.
 
 One-line demo narrative:
 
 ```text
-Open CloudBridge → ask to convert input/sample-three-tier.yaml → the agent analyzes,
-maps, generates Terraform, reviews compliance → asks for approval → output/ files are written only after approval.
+Open CloudBridge → ask to convert input/sample-three-tier.yaml → the pipeline loads,
+maps, generates Terraform, and reviews compliance in one response.
 ```
 
 ---
