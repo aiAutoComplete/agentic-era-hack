@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -342,6 +344,66 @@ def write_generated_output_files(
         files["architecture_summary.md"] = gcp_plan.strip() + "\n"
 
     return write_project_files_after_approval(files, approval)
+
+
+def generate_architecture_diagrams() -> dict[str, Any]:
+    """Generate AWS, GCP, and conversion diagrams for every input template."""
+    script = REPO_ROOT / "scripts" / "generate_diagrams.py"
+    if not script.exists():
+        return {
+            "status": "not_generated",
+            "reason": "scripts/generate_diagrams.py not found",
+        }
+
+    try:
+        result = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--with",
+                "diagrams",
+                sys.executable,
+                str(script),
+                "--all",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive runtime guard
+        return {"status": "not_generated", "reason": f"{type(exc).__name__}: {exc}"}
+
+    if result.returncode != 0:
+        return {
+            "status": "not_generated",
+            "reason": (result.stderr or result.stdout)[-1200:],
+        }
+
+    diagrams = sorted(
+        str(path.relative_to(REPO_ROOT)) for path in (OUTPUT_DIR / "diagrams").glob("*")
+    )
+    return {"status": "generated", "files": diagrams}
+
+
+def write_outputs_and_generate_diagrams(
+    terraform_bundle: str,
+    compliance_report: str,
+    gcp_plan: str = "",
+) -> dict[str, Any]:
+    """Write generated outputs immediately, then generate architecture diagrams."""
+    write_result = write_generated_output_files(
+        terraform_bundle=terraform_bundle,
+        compliance_report=compliance_report,
+        gcp_plan=gcp_plan,
+        approval="approve",
+    )
+    if write_result.get("status") != "written":
+        return {"write": write_result, "diagrams": {"status": "skipped"}}
+
+    diagram_result = generate_architecture_diagrams()
+    return {"write": write_result, "diagrams": diagram_result}
 
 
 # Backward-compatible helpers used by existing tests/imports.

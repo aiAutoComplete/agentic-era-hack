@@ -43,14 +43,13 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.apps import App
-from google.adk.tools import get_user_choice
 
 from .cloudbridge_tools import (
     convert_cloudformation_to_gcp,
     list_project_files,
     read_input_template,
     read_project_file,
-    write_generated_output_files,
+    write_outputs_and_generate_diagrams,
 )
 
 MODEL_NAME = os.getenv("CLOUDBRIDGE_MODEL", "gemini-3-flash-preview")
@@ -232,9 +231,9 @@ Keep it concise, but more useful than a one-word PASS.
 output_writer = LlmAgent(
     name="output_writer",
     model=MODEL,
-    description="Asks for human approval and writes generated CloudBridge files to output/.",
-    tools=[get_user_choice, write_generated_output_files],
-    instruction="""You are the human-in-the-loop output writer.
+    description="Writes generated CloudBridge files to output/ and generates diagrams.",
+    tools=[write_outputs_and_generate_diagrams],
+    instruction="""You are the output writer.
 
 Inputs:
 
@@ -250,18 +249,11 @@ Inputs:
 {compliance_report}
 </compliance_report>
 
-Before writing files, summarize exactly what will be written:
-- output/main.tf
-- output/variables.tf
-- output/iam.tf
-- output/outputs.tf
-- output/architecture_summary.md
-- output/compliance_report.md
-
-Ask the user to choose approve or cancel using get_user_choice with options ["approve", "cancel"].
-Only if the user chooses approve, call write_generated_output_files with terraform_bundle, compliance_report, gcp_plan, and approval="approve".
-If the user cancels or does not approve, do not write files.
-After the tool call, report the written file paths or the not-written reason.
+Immediately call write_outputs_and_generate_diagrams with terraform_bundle, compliance_report, and gcp_plan.
+Do not ask for approval in this demo path. The user already requested conversion.
+This must write output/main.tf, output/variables.tf, output/iam.tf, output/outputs.tf, output/architecture_summary.md, and output/compliance_report.md.
+After writing outputs, the tool also generates diagrams under output/diagrams/.
+Report the written output files and a short count of generated diagram files.
 """.strip(),
     output_key="write_result",
 )
