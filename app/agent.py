@@ -58,6 +58,26 @@ os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "True")
 
 MODEL_NAME = os.getenv("CLOUDBRIDGE_MODEL", "gemini-3-flash-preview")
 
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").lower() in {"true", "1"}
+
+
+def _model_name_for_backend(model_name: str) -> str:
+    """Make Vertex AI selection explicit so ADK never falls back to API-key mode."""
+    if model_name.startswith("projects/") or not _env_enabled("GOOGLE_GENAI_USE_VERTEXAI"):
+        return model_name
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", project_id or "cloudbridge-local")
+    location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
+    return f"projects/{project}/locations/{location}/publishers/google/models/{model_name}"
+
+
+def _gemini_model() -> Gemini:
+    return Gemini(
+        model=_model_name_for_backend(MODEL_NAME),
+        retry_options=types.HttpRetryOptions(attempts=3),
+    )
+
 SUPPORTED_TYPES: dict[str, str] = {
     "AWS::EC2::VPC": "google_compute_network",
     "AWS::EC2::Subnet": "google_compute_subnetwork",
@@ -744,7 +764,7 @@ def convert_input_file_to_gcp(filename: str = "sample-three-tier.yaml", write_fi
 
 translation_agent = Agent(
     name="translation_agent",
-    model=Gemini(model=MODEL_NAME, retry_options=types.HttpRetryOptions(attempts=3)),
+    model=_gemini_model(),
     description="Maps supported AWS CloudFormation resources to Google Cloud targets.",
     input_schema=ResourceList,
     output_schema=TranslationPlan,
@@ -757,7 +777,7 @@ assumptions, and return valid TranslationPlan JSON only.
 
 terraform_agent = Agent(
     name="terraform_agent",
-    model=Gemini(model=MODEL_NAME, retry_options=types.HttpRetryOptions(attempts=3)),
+    model=_gemini_model(),
     description="Generates starter Google Terraform from a CloudBridge TranslationPlan.",
     input_schema=TranslationPlan,
     output_schema=TerraformBundle,
@@ -772,7 +792,7 @@ JSON only.
 
 fix_agent = Agent(
     name="fix_agent",
-    model=Gemini(model=MODEL_NAME, retry_options=types.HttpRetryOptions(attempts=3)),
+    model=_gemini_model(),
     description="Applies minimal fixes for CloudBridge compliance findings.",
     output_schema=TerraformBundle,
     instruction="""
@@ -787,7 +807,7 @@ Return the corrected TerraformBundle JSON only.
 
 root_agent = Agent(
     name="cloudbridge",
-    model=Gemini(model=MODEL_NAME, retry_options=types.HttpRetryOptions(attempts=3)),
+    model=_gemini_model(),
     description="AWS CloudFormation to GCP Terraform and compliance report agent.",
     sub_agents=[translation_agent, terraform_agent, fix_agent],
     tools=[
