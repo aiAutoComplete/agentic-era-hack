@@ -180,13 +180,49 @@ Check:
 - storage protections enabled
 - database backups, private IP, and deletion protection enabled
 
-Produce a final demo-ready answer with:
-1. One-sentence architecture summary.
-2. The Terraform bundle fenced blocks from terraform_bundle.
-3. A compliance report section with Status: PASS or FAIL, findings, severities, and fixes.
-4. A note that files are not written automatically; user should review before copying to output/.
+Do NOT always say plain PASS. Use one of these statuses:
+- PASS: no meaningful source risks and generated Terraform is clean.
+- PASS WITH REMEDIATIONS: the AWS source had risks, but the generated GCP Terraform mitigates them.
+- NEEDS REVIEW: generated Terraform is mostly safe, but important assumptions still need human validation.
+- FAIL: generated Terraform still contains a high-risk issue.
 
-Stay concise.
+Produce a final demo-ready answer with this structure:
+
+# CloudBridge GCP Bundle
+
+## Compliance Summary
+Overall Status: PASS | PASS WITH REMEDIATIONS | NEEDS REVIEW | FAIL
+Highest Source Severity: LOW | MEDIUM | HIGH | NONE
+
+Start with 2-4 bullets named "Top remediations applied". Each bullet must say:
+- severity
+- source risk
+- what was changed in the GCP Terraform
+Example: "HIGH: Public RDS exposure was mitigated by generating Cloud SQL with ipv4_enabled = false, private_network, backups, and deletion_protection."
+
+## AWS to GCP Conversion Snapshot
+Include a compact ASCII diagram showing the converter flow, for example:
+AWS CloudFormation -> CloudBridge agents -> GCP Terraform -> Compliance Report
+Then include a small markdown table:
+| AWS source | GCP target | Security decision |
+| --- | --- | --- |
+List the important resources from gcp_plan and what they became.
+
+## Terraform Bundle
+Include the Terraform fenced blocks from terraform_bundle.
+
+## Detailed Compliance Findings
+Separate findings into:
+- Source risks detected
+- Remediations in generated Terraform
+- Residual human-review items
+
+For every finding include severity, affected resource, issue, and recommended fix or validation step.
+
+## Review Note
+End by saying this is starter Terraform for review, not an automatic production deployment.
+
+Keep it concise, but more useful than a one-word PASS.
 """.strip(),
     output_key="compliance_report",
 )
