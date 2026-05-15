@@ -178,6 +178,37 @@ compliance_reviewer returns the final bundle plus PASS/FAIL findings
 
 ---
 
+## Optional architecture diagrams
+
+CloudBridge also includes a separate, manual diagram generator so the working ADK
+agent flow stays untouched. It uses Graphviz and the Python `diagrams` package to
+create AWS source, GCP target, and AWS→GCP conversion diagrams.
+
+Generate diagrams for every sample input:
+
+```bash
+uv run --with diagrams python scripts/generate_diagrams.py --all
+```
+
+Generate diagrams for one input:
+
+```bash
+uv run --with diagrams python scripts/generate_diagrams.py input/lambda-reverse-proxy.yaml
+```
+
+Outputs are written to:
+
+```text
+output/diagrams/
+  aws-*.png / aws-*.svg
+  gcp-*.png / gcp-*.svg
+  conversion-*.png / conversion-*.svg
+```
+
+This script is intentionally not part of the live ADK playground path.
+
+---
+
 ## Compliance rules
 
 The compliance gate is deliberately small and explainable:
