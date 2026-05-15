@@ -14,9 +14,9 @@
 # limitations under the License.
 """CloudBridge ADK app.
 
-This follows the simpler CloudBridge pattern from the hackathon scaffold:
-small LLM agents in a SequentialAgent pipeline. The only tool is safe project
-file reading for loading CloudFormation templates by path.
+A conversational CloudBridge architect talks with the user, gathers the right
+input, answers project/file questions, and delegates full conversions to a small
+SequentialAgent pipeline only when the user asks for conversion.
 """
 
 from __future__ import annotations
@@ -191,24 +191,61 @@ Stay concise.
     output_key="compliance_report",
 )
 
-root_agent = SequentialAgent(
-    name="cloudbridge_architect",
+conversion_pipeline = SequentialAgent(
+    name="conversion_pipeline",
     description=(
-        "Loads an AWS CloudFormation template, maps it to Google Cloud, "
-        "generates starter Terraform, and reviews compliance."
+        "Runs the full CloudBridge conversion: load CloudFormation, map to "
+        "Google Cloud, generate Terraform, and review compliance."
     ),
     sub_agents=[source_loader, translator, terraform_writer, compliance_reviewer],
+)
+
+root_agent = LlmAgent(
+    name="cloudbridge_architect",
+    model=MODEL,
+    description="Conversational CloudBridge AWS-to-GCP architecture assistant.",
+    tools=[list_project_files, read_project_file],
+    sub_agents=[conversion_pipeline],
+    instruction="""You are CloudBridge Architect, a conversational AWS-to-Google Cloud migration assistant.
+
+You should NOT run the full conversion pipeline for every message. First talk to the human and understand what they want.
+
+You can directly help with:
+- greeting and explaining what CloudBridge can do
+- listing available input/output files with list_project_files
+- reading CloudFormation, Terraform, README, or report files with read_project_file
+- answering architecture questions from files you read
+- asking clarifying questions when the user has not chosen an input template
+
+When the user clearly asks to convert, migrate, generate Terraform, or create a GCP bundle for a CloudFormation file, delegate to the sub-agent named conversion_pipeline.
+
+Good interaction pattern:
+1. If no file is named, list input files and ask which one to use.
+2. If a file is named and the user asks to convert, run conversion_pipeline.
+3. If the user asks only to inspect, explain, list, or compare, answer conversationally without running conversion_pipeline.
+4. If the user asks for unrelated topics, politely say you only help with CloudBridge AWS-to-GCP architecture migration.
+
+Keep responses concise, human, and demo-friendly.
+""".strip(),
 )
 
 app = App(root_agent=root_agent, name="app")
 
 cloudbridge_architect = root_agent
-specialist_agents = [source_loader, translator, terraform_writer, compliance_reviewer]
+specialist_agents = [
+    root_agent,
+    conversion_pipeline,
+    source_loader,
+    translator,
+    terraform_writer,
+    compliance_reviewer,
+]
 
 __all__ = [
     "app",
     "cloudbridge_architect",
     "compliance_reviewer",
+    "conversion_pipeline",
     "convert_cloudformation_to_gcp",
     "read_input_template",
     "root_agent",

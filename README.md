@@ -81,16 +81,18 @@ output/
 The main implementation is split across:
 
 ```text
-app/agent.py              # simple ADK SequentialAgent pipeline
+app/agent.py              # conversational root agent + conversion pipeline
 app/cloudbridge_tools.py  # safe file helper + deterministic test helpers
 app/parser.py             # CloudFormation parser
 app/terraform_gen.py      # starter Terraform generation
 app/compliance.py         # explainable compliance checks
 ```
 
-CloudBridge uses a simple ADK `SequentialAgent` pipeline inspired by the
-hackathon scaffold: load source, translate architecture, write Terraform, review
-compliance. The only live tool in the agent path is safe project file reading.
+CloudBridge uses a conversational root agent so it can talk with the human,
+list/read files, ask for missing input, and only run the full conversion when the
+user asks. The conversion path is a simple ADK `SequentialAgent` pipeline
+inspired by the hackathon scaffold: load source, translate architecture, write
+Terraform, review compliance.
 
 ---
 
@@ -100,15 +102,16 @@ compliance. The only live tool in the agent path is safe project file reading.
 User request
     │
     ▼
-cloudbridge_architect  (SequentialAgent)
+cloudbridge_architect  (conversational LlmAgent)
     │
-    ├── source_loader        # reads input/sample*.yaml
+    ├── talks with user, lists/reads project files, asks clarifying questions
     │
-    ├── translator           # maps AWS resources to Google Cloud
-    │
-    ├── terraform_writer     # emits main.tf, variables.tf, iam.tf, outputs.tf
-    │
-    └── compliance_reviewer  # reports PASS/FAIL findings and fixes
+    └── conversion_pipeline  (SequentialAgent; only when conversion is requested)
+          │
+          ├── source_loader        # reads input/sample*.yaml
+          ├── translator           # maps AWS resources to Google Cloud
+          ├── terraform_writer     # emits main.tf, variables.tf, iam.tf, outputs.tf
+          └── compliance_reviewer  # reports PASS/FAIL findings and fixes
 ```
 
 Runtime tooling is intentionally tiny:
@@ -122,8 +125,7 @@ unit tests and fallback scripts, but the playground path is agent-led.
 One-line demo narrative:
 
 ```text
-Open CloudBridge → ask to convert input/sample-three-tier.yaml → the pipeline loads,
-maps, generates Terraform, and reviews compliance in one response.
+Open CloudBridge → chat/list/read files as needed → ask to convert input/sample-three-tier.yaml → the pipeline loads, maps, generates Terraform, and reviews compliance in one response.
 ```
 
 ---
