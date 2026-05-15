@@ -12,46 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
+from google.adk.workflow import Workflow
 
-from app.agent import root_agent
+from app.agent import app, root_agent, specialist_agents
 
 
-def test_agent_stream() -> None:
-    """
-    Integration test for the agent stream functionality.
-    Tests that the agent returns valid streaming responses.
-    """
+def test_cloudbridge_graph_workflow_imports() -> None:
+    """The ADK app should expose the graph workflow without requiring live ADC."""
+    assert app.name == "app"
+    assert isinstance(root_agent, Workflow)
+    assert root_agent.name == "cloudbridge_architect"
+    assert root_agent.graph is not None
 
-    session_service = InMemorySessionService()
 
-    session = session_service.create_session_sync(user_id="test_user", app_name="test")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test")
-
-    message = types.Content(
-        role="user", parts=[types.Part.from_text(text="Why is the sky blue?")]
-    )
-
-    events = list(
-        runner.run(
-            new_message=message,
-            user_id="test_user",
-            session_id=session.id,
-            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-        )
-    )
-    assert len(events) > 0, "Expected at least one message"
-
-    has_text_content = False
-    for event in events:
-        if (
-            event.content
-            and event.content.parts
-            and any(part.text for part in event.content.parts)
-        ):
-            has_text_content = True
-            break
-    assert has_text_content, "Expected at least one message with text content"
+def test_specialist_agents_are_registered() -> None:
+    names = {agent.name for agent in specialist_agents}
+    assert names == {
+        "project_browser_agent",
+        "aws_source_analyst_agent",
+        "conversion_agent",
+        "terraform_generator_agent",
+        "compliance_reviewer_agent",
+        "human_approval_writer_agent",
+    }

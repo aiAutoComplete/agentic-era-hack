@@ -28,11 +28,27 @@ from app.app_utils.typing import Feedback
 # Load environment variables from .env file at runtime
 load_dotenv()
 
+_DEFAULT_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "cloudbridge-local")
+_DEFAULT_LOCATION = os.environ.get(
+    "VERTEXAI_LOCATION", os.environ.get("GOOGLE_CLOUD_REGION", "us-central1")
+)
+vertexai.init(project=_DEFAULT_PROJECT, location=_DEFAULT_LOCATION)
+
+
+class _LocalLogger:
+    def log_struct(self, payload: dict[str, Any], severity: str = "INFO") -> None:
+        logging.log(getattr(logging, severity, logging.INFO), payload)
+
 
 class AgentEngineApp(AdkApp):
     def set_up(self) -> None:
         """Initialize the agent engine app with logging and telemetry."""
-        vertexai.init()
+        if os.environ.get("INTEGRATION_TEST") == "TRUE":
+            logging.basicConfig(level=logging.INFO)
+            self.logger = _LocalLogger()
+            return
+
+        vertexai.init(project=_DEFAULT_PROJECT, location=_DEFAULT_LOCATION)
         setup_telemetry()
         super().set_up()
         logging.basicConfig(level=logging.INFO)
@@ -49,7 +65,7 @@ class AgentEngineApp(AdkApp):
     def register_operations(self) -> dict[str, list[str]]:
         """Registers the operations of the Agent."""
         operations = super().register_operations()
-        operations[""] = operations.get("", []) + ["register_feedback"]
+        operations[""] = [*operations.get("", []), "register_feedback"]
         return operations
 
 

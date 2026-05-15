@@ -78,138 +78,67 @@ output/
     └── app_utils/
 ```
 
-The main implementation is in:
+The main implementation is split across:
 
 ```text
-app/agent.py
+app/agent.py              # ADK 2 graph workflow + specialist agents
+app/cloudbridge_tools.py  # small safe tools used by agents
+app/parser.py             # CloudFormation parser
+app/terraform_gen.py      # starter Terraform generation
+app/compliance.py         # explainable compliance checks
 ```
 
-That file contains:
-
-- Pydantic schemas
-- CloudFormation parser
-- fixed AWS → GCP mapping catalog
-- translation agent
-- Terraform generation agent
-- fix agent
-- deterministic compliance checker
-- Google ADK `root_agent`
-- Agent Starter Pack `app = App(...)` wrapper for Agent Engine deployment
-- local `input/` and `output/` helpers for hackathon demos
+CloudBridge now uses ADK 2 graph workflows instead of one deterministic router.
+The workflow root is `cloudbridge_architect` and it routes into specialist
+agents for project browsing, AWS source analysis, conversion planning, Terraform
+generation, compliance review, and human-approved file writes.
 
 ---
 
 ## Agent flow
 
 ```text
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                          CloudBridge Hackathon MVP                           │
-│              AWS CloudFormation  ──▶  GCP Terraform + Report                 │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-
-  ┌──────────────────────────────┐
-  │  Input CloudFormation File   │
-  │  YAML or JSON                │
-  │                              │
-  │  Supported MVP resources:    │
-  │  • VPC / Subnets             │
-  │  • EC2 / Launch Template     │
-  │  • RDS PostgreSQL            │
-  │  • S3 Bucket                 │
-  │  • IAM Role / Policy         │
-  └───────────────┬──────────────┘
-                  │
-                  ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │  1. parse_cfn                                                           │
-  │  deterministic function node                                             │
-  │                                                                          │
-  │  • Load YAML / JSON                                                      │
-  │  • Extract logical_id, aws_type, properties                              │
-  │  • Mark unsupported resources as warnings                                │
-  │  • No LLM needed                                                         │
-  └───────────────┬──────────────────────────────────────────────────────────┘
-                  │
-                  │ ResourceList
-                  ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │  2. translation_agent                                                    │
-  │  ADK specialist agent, single_turn                                        │
-  │                                                                          │
-  │  • Map AWS resources to GCP equivalents                                  │
-  │  • Preserve architecture intent                                          │
-  │  • Convert IAM intent into service account / IAM binding plan            │
-  │  • Record assumptions                                                    │
-  └───────────────┬──────────────────────────────────────────────────────────┘
-                  │
-                  │ TranslationPlan
-                  ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │  3. terraform_agent                                                      │
-  │  ADK specialist agent, single_turn                                        │
-  │                                                                          │
-  │  • Generate starter Terraform                                            │
-  │  • Keep files small and readable                                         │
-  │  • Prefer private Cloud SQL, least-privilege IAM, protected buckets      │
-  │                                                                          │
-  │  Output files:                                                           │
-  │    main.tf        variables.tf        iam.tf        outputs.tf            │
-  └───────────────┬──────────────────────────────────────────────────────────┘
-                  │
-                  │ TerraformBundle
-                  ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │  4. compliance_router                                                    │
-  │  deterministic function node                                             │
-  │                                                                          │
-  │  Runs three checks:                                                      │
-  │  ① No public database                                                    │
-  │  ② No wildcard / owner-style IAM                                         │
-  │  ③ Storage and database protection documented or enabled                 │
-  └───────────────┬───────────────────────────────────────────────┬──────────┘
-                  │                                               │
-             PASS │                                               │ FAIL
-                  ▼                                               ▼
-  ┌──────────────────────────────────────┐        ┌──────────────────────────┐
-  │  5A. package_output                  │        │  5B. fix_agent           │
-  │  deterministic function node         │        │  ADK specialist agent    │
-  │                                      │        │  single_turn             │
-  │  • Build final file bundle           │        │                          │
-  │  • Add compliance_report.md          │        │  • Apply only required   │
-  │  • Return demo-ready output          │        │    compliance fixes      │
-  └──────────────────┬───────────────────┘        └────────────┬─────────────┘
-                     │                                         │
-                     │                                         │ corrected TerraformBundle
-                     │                                         ▼
-                     │                         ┌──────────────────────────────┐
-                     │                         │  6. package_output           │
-                     │                         │  deterministic function node │
-                     │                         │                              │
-                     │                         │  • Package corrected files   │
-                     │                         │  • Add compliance report     │
-                     │                         └────────────┬─────────────────┘
-                     │                                      │
-                     └──────────────────┬───────────────────┘
-                                        ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │  Final Output Bundle                                                     │
-  │                                                                          │
-  │  output/                                                                 │
-  │    main.tf                                                               │
-  │    variables.tf                                                          │
-  │    iam.tf                                                                │
-  │    outputs.tf                                                            │
-  │    architecture_summary.md                                                │
-  │    compliance_report.md                                                   │
-  └──────────────────────────────────────────────────────────────────────────┘
+User request
+    │
+    ▼
+cloudbridge_architect  (ADK 2 Workflow graph)
+    │
+    ├── browse/help ─────▶ project_browser_agent
+    │
+    ├── analyze ─────────▶ aws_source_analyst_agent
+    │
+    ├── compliance ──────▶ compliance_reviewer_agent
+    │
+    └── convert/write ───▶ aws_source_analyst_for_conversion
+                             │
+                             ▼
+                           conversion_agent
+                             │
+                             ▼
+                           terraform_generator_agent
+                             │
+                             ▼
+                           compliance_reviewer_for_conversion
+                             │
+                             ▼
+                           human_approval_writer_agent
+                           asks approve / revise / cancel before writes
 ```
+
+Tooling is intentionally small:
+
+- `list_project_files(scope)`
+- `read_project_file(path)` with safe path checks
+- `parse_cloudformation(template_or_path)`
+- `build_conversion_bundle(template_or_path)`
+- `run_compliance_review(template_or_path, terraform_text=None)`
+- `write_project_files_after_approval(files, approval)`
 
 One-line demo narrative:
 
 ```text
-Upload CloudFormation → parse resources → map to GCP → generate Terraform →
-run compliance gate → optionally fix → return Terraform + compliance report.
+Open CloudBridge → ask to convert input/sample-three-tier.yaml → agents analyze,
+map, generate Terraform, review compliance → writer asks for approval → output/ files are written only after approval.
 ```
 
 ---

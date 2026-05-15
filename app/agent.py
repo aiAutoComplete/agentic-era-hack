@@ -1,4 +1,3 @@
-# ruff: noqa
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,41 +11,42 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CloudBridge ADK app.
+"""CloudBridge ADK 2 graph workflow app.
 
-CloudBridge turns a small AWS CloudFormation template into a first-pass Google
-Cloud Terraform bundle and a concise compliance report.  This file keeps the
-Google Agent Starter Pack shape (`root_agent` plus `app = App(...)`) while
-adding the CloudBridge parser, deterministic conversion tools, specialist
-sub-agents, and local input/output helpers described in README.md.
+The root is a graph-based workflow. Specialist ADK agents do the architecture
+work; small Python tools only provide safe file access, parsing, deterministic
+starter Terraform, compliance scanning, and approved writes.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import re
 from pathlib import Path
-from typing import Any, AsyncGenerator, Literal
+from typing import Any
 
 import google.auth
 from dotenv import load_dotenv
-from google.adk.agents import Agent, BaseAgent
-from google.adk.agents.invocation_context import InvocationContext
+from google.adk.agents import Agent
 from google.adk.apps import App
-from google.adk.events import Event
 from google.adk.models import Gemini
+from google.adk.tools import get_user_choice
+from google.adk.workflow import START, Workflow, node
 from google.auth.exceptions import DefaultCredentialsError
 from google.genai import types
-from pydantic import BaseModel, Field
+
+from .cloudbridge_tools import (
+    build_conversion_bundle,
+    convert_cloudformation_to_gcp,
+    list_project_files,
+    parse_cloudformation,
+    read_input_template,
+    read_project_file,
+    run_compliance_review,
+    write_project_files_after_approval,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-INPUT_DIR = REPO_ROOT / "input"
-OUTPUT_DIR = REPO_ROOT / "output"
 
-# Load the same root .env used by `make playground`/ADK, and let it win over any
-# stale shell values. This keeps the generated playground flow working without a
-# Gemini API key when GOOGLE_GENAI_USE_VERTEXAI=True is configured in .env.
 load_dotenv(REPO_ROOT / ".env", override=True)
 
 try:
@@ -66,12 +66,15 @@ def _env_enabled(name: str) -> bool:
 
 
 def _model_name_for_backend(model_name: str) -> str:
-    """Make Vertex AI selection explicit so ADK never falls back to API-key mode."""
-    if model_name.startswith("projects/") or not _env_enabled("GOOGLE_GENAI_USE_VERTEXAI"):
+    if model_name.startswith("projects/") or not _env_enabled(
+        "GOOGLE_GENAI_USE_VERTEXAI"
+    ):
         return model_name
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", project_id or "cloudbridge-local")
     location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
-    return f"projects/{project}/locations/{location}/publishers/google/models/{model_name}"
+    return (
+        f"projects/{project}/locations/{location}/publishers/google/models/{model_name}"
+    )
 
 
 def _gemini_model() -> Gemini:
@@ -80,1016 +83,255 @@ def _gemini_model() -> Gemini:
         retry_options=types.HttpRetryOptions(attempts=3),
     )
 
-SUPPORTED_TYPES: dict[str, str] = {
-    "AWS::EC2::VPC": "google_compute_network",
-    "AWS::EC2::Subnet": "google_compute_subnetwork",
-    "AWS::EC2::SecurityGroup": "google_compute_firewall",
-    "AWS::EC2::Instance": "google_compute_instance",
-    "AWS::EC2::LaunchTemplate": "google_compute_instance_template",
-    "AWS::RDS::DBInstance": "google_sql_database_instance",
-    "AWS::S3::Bucket": "google_storage_bucket",
-    "AWS::IAM::Role": "google_service_account",
-    "AWS::IAM::Policy": "google_project_iam_member",
-    "AWS::IAM::ManagedPolicy": "google_project_iam_member",
-}
 
-
-class ParsedResource(BaseModel):
-    logical_id: str
-    aws_type: str
-    gcp_target: str | None = None
-    properties: dict[str, Any] = Field(default_factory=dict)
-
-
-class ResourceList(BaseModel):
-    resources: list[ParsedResource]
-    unsupported: list[ParsedResource] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-class MappingItem(BaseModel):
-    aws_logical_id: str
-    aws_type: str
-    gcp_resource_type: str
-    gcp_name: str
-    rationale: str
-    assumptions: list[str] = Field(default_factory=list)
-
-
-class TranslationPlan(BaseModel):
-    mappings: list[MappingItem]
-    iam_bindings: list[dict[str, Any]] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-class TerraformBundle(BaseModel):
-    main_tf: str
-    variables_tf: str = ""
-    iam_tf: str = ""
-    outputs_tf: str = ""
-    architecture_summary_md: str = ""
-
-
-class ComplianceFinding(BaseModel):
-    rule_id: str
-    severity: Literal["LOW", "MEDIUM", "HIGH"]
-    resource: str
-    issue: str
-    recommended_fix: str
-
-
-class ComplianceResult(BaseModel):
-    status: Literal["PASS", "FAIL"]
-    findings: list[ComplianceFinding] = Field(default_factory=list)
-
-
-class FinalPackage(BaseModel):
-    files: dict[str, str]
-    compliance: ComplianceResult
-    parsed: ResourceList | None = None
-    translation: TranslationPlan | None = None
-    output_dir: str | None = None
-
-
-def _snake(name: str) -> str:
-    value = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-    value = re.sub(r"[^0-9A-Za-z]+", "_", value)
-    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value).lower().strip("_")
-    return value or "resource"
-
-
-def _tf_ref(value: Any) -> str | None:
-    """Return a CloudFormation reference logical id when our YAML loader flattens it."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        for key in ("Ref", "Fn::Ref"):
-            if key in value:
-                return str(value[key])
-    return None
-
-
-def _string(value: Any, default: str = "") -> str:
-    if value is None:
-        return default
-    if isinstance(value, (str, int, float)):
-        return str(value)
-    return default
-
-
-def _load_template(template_text: str) -> dict[str, Any]:
-    """Load CloudFormation JSON/YAML. Unknown tags like !Ref are kept readable."""
-    try:
-        return json.loads(template_text)
-    except json.JSONDecodeError:
-        pass
-
-    try:
-        import yaml
-
-        class CfnLoader(yaml.SafeLoader):
-            pass
-
-        def construct_unknown(loader: yaml.SafeLoader, node: yaml.Node) -> Any:
-            if isinstance(node, yaml.ScalarNode):
-                return loader.construct_scalar(node)
-            if isinstance(node, yaml.SequenceNode):
-                return loader.construct_sequence(node)
-            if isinstance(node, yaml.MappingNode):
-                return loader.construct_mapping(node)
-            return None
-
-        CfnLoader.add_constructor(None, construct_unknown)
-        loaded = yaml.load(template_text, Loader=CfnLoader)
-        return loaded or {}
-    except Exception as exc:
-        raise ValueError(f"Template must be valid JSON or YAML: {exc}") from exc
-
-
-def parse_cfn(node_input: str | dict[str, Any]) -> ResourceList:
-    """Parse CloudFormation into supported and unsupported resource lists."""
-    if isinstance(node_input, dict):
-        template_text = node_input.get("template") or node_input.get("message") or json.dumps(node_input)
-    else:
-        template_text = node_input
-
-    template = _load_template(template_text)
-    resources = template.get("Resources", {})
-    if not isinstance(resources, dict):
-        raise ValueError("CloudFormation template must contain a Resources mapping.")
-
-    supported: list[ParsedResource] = []
-    unsupported: list[ParsedResource] = []
-    warnings: list[str] = []
-
-    for logical_id, body in resources.items():
-        if not isinstance(body, dict):
-            warnings.append(f"Skipped {logical_id}: resource body is not an object.")
-            continue
-        aws_type = str(body.get("Type", ""))
-        properties = body.get("Properties", {}) if isinstance(body.get("Properties", {}), dict) else {}
-        item = ParsedResource(
-            logical_id=str(logical_id),
-            aws_type=aws_type,
-            gcp_target=SUPPORTED_TYPES.get(aws_type),
-            properties=properties,
-        )
-        if item.gcp_target:
-            supported.append(item)
-        else:
-            unsupported.append(item)
-            warnings.append(f"Unsupported for MVP: {logical_id} ({aws_type})")
-
-    return ResourceList(resources=supported, unsupported=unsupported, warnings=warnings)
-
-
-def parse_cloudformation_tool(template: str) -> dict[str, Any]:
-    """ADK tool: parse a pasted CloudFormation YAML/JSON template."""
-    return parse_cfn(template).model_dump()
-
-
-def read_input_template(filename: str = "sample-three-tier.yaml") -> str:
-    """ADK tool: read a template from the local input/ directory."""
-    safe_name = Path(filename).name
-    path = INPUT_DIR / safe_name
-    if not path.exists():
-        available = sorted(p.name for p in INPUT_DIR.glob("*.y*ml")) if INPUT_DIR.exists() else []
-        raise FileNotFoundError(f"No input template named {safe_name}. Available: {available}")
-    return path.read_text()
-
-
-def service_mapping_catalog() -> dict[str, str]:
-    """ADK tool: return the fixed MVP AWS-to-GCP mapping catalog."""
-    return SUPPORTED_TYPES
-
-
-def _mapping_for_resource(resource: ParsedResource) -> MappingItem:
-    gcp_type = resource.gcp_target or "unsupported"
-    return MappingItem(
-        aws_logical_id=resource.logical_id,
-        aws_type=resource.aws_type,
-        gcp_resource_type=gcp_type,
-        gcp_name=_snake(resource.logical_id),
-        rationale=f"{resource.aws_type} maps to {gcp_type} for the CloudBridge MVP.",
-        assumptions=[
-            "Generated Terraform is starter code for review, not an automatic production deployment.",
-            "Region, project, naming, and CIDR choices should be verified by the migration team.",
-        ],
-    )
-
-
-def translate_resources(parsed: ResourceList | dict[str, Any]) -> TranslationPlan:
-    """Create a deterministic first-pass AWS-to-GCP architecture mapping."""
-    if isinstance(parsed, dict):
-        parsed = ResourceList.model_validate(parsed)
-
-    mappings = [_mapping_for_resource(resource) for resource in parsed.resources]
-    iam_bindings: list[dict[str, Any]] = []
-    for resource in parsed.resources:
-        if resource.aws_type in {"AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"}:
-            iam_bindings.append(
-                {
-                    "source": resource.logical_id,
-                    "member": "serviceAccount:${google_service_account.app.email}",
-                    "roles": ["roles/logging.logWriter", "roles/storage.objectViewer"],
-                }
-            )
-
-    return TranslationPlan(mappings=mappings, iam_bindings=iam_bindings, warnings=parsed.warnings)
-
-
-def translate_resources_tool(parsed_json: dict[str, Any]) -> dict[str, Any]:
-    """ADK tool: convert parsed resources into a GCP mapping plan."""
-    return translate_resources(parsed_json).model_dump()
-
-
-def _emit_header() -> list[str]:
-    return [
-        "terraform {",
-        "  required_version = \">= 1.5.0\"",
-        "  required_providers {",
-        "    google = {",
-        "      source  = \"hashicorp/google\"",
-        "      version = \"~> 6.0\"",
-        "    }",
-        "  }",
-        "}",
-        "",
-        "provider \"google\" {",
-        "  project = var.project_id",
-        "  region  = var.region",
-        "}",
-        "",
-    ]
-
-
-def generate_terraform(parsed: ResourceList | dict[str, Any]) -> TerraformBundle:
-    """Generate deterministic starter Terraform for supported MVP resources."""
-    if isinstance(parsed, dict):
-        parsed = ResourceList.model_validate(parsed)
-
-    main: list[str] = _emit_header()
-    iam: list[str] = []
-    outputs: list[str] = []
-    summary: list[str] = [
-        "# CloudBridge architecture summary",
-        "",
-        "This starter bundle was generated from an AWS CloudFormation template.",
-        "It maps supported AWS resources to Google Cloud equivalents for review.",
-        "",
-        "## Resource mapping",
-        "",
-        "| AWS logical id | AWS type | GCP Terraform target |",
-        "| --- | --- | --- |",
-    ]
-
-    network_by_logical: dict[str, str] = {}
-    subnet_by_logical: dict[str, str] = {}
-    service_account_emitted = False
-    first_service_account_name = "app_service_account"
-
-    for resource in parsed.resources:
-        tf_name = _snake(resource.logical_id)
-        props = resource.properties
-        gcp = resource.gcp_target or "unsupported"
-        summary.append(f"| `{resource.logical_id}` | `{resource.aws_type}` | `{gcp}` |")
-
-        if resource.aws_type == "AWS::EC2::VPC":
-            network_by_logical[resource.logical_id] = tf_name
-            main.extend(
-                [
-                    f'resource "google_compute_network" "{tf_name}" {{',
-                    f'  name                    = "${{var.name_prefix}}-{tf_name}"',
-                    "  auto_create_subnetworks = false",
-                    "  routing_mode            = \"REGIONAL\"",
-                    "}",
-                    "",
-                ]
-            )
-            outputs.extend(
-                [
-                    f'output "{tf_name}_network_self_link" {{',
-                    f"  value = google_compute_network.{tf_name}.self_link",
-                    "}",
-                    "",
-                ]
-            )
-
-        elif resource.aws_type == "AWS::EC2::Subnet":
-            subnet_by_logical[resource.logical_id] = tf_name
-            vpc_ref = _tf_ref(props.get("VpcId"))
-            network_name = network_by_logical.get(vpc_ref or "", "main_vpc")
-            cidr = _string(props.get("CidrBlock"), "10.0.0.0/24")
-            private_access = "true" if "private" in resource.logical_id.lower() else "false"
-            main.extend(
-                [
-                    f'resource "google_compute_subnetwork" "{tf_name}" {{',
-                    f'  name                     = "${{var.name_prefix}}-{tf_name}"',
-                    f'  ip_cidr_range            = "{cidr}"',
-                    "  region                   = var.region",
-                    f"  network                  = google_compute_network.{network_name}.id",
-                    f"  private_ip_google_access = {private_access}",
-                    "}",
-                    "",
-                ]
-            )
-
-        elif resource.aws_type == "AWS::EC2::SecurityGroup":
-            vpc_ref = _tf_ref(props.get("VpcId"))
-            network_name = network_by_logical.get(vpc_ref or "", "main_vpc")
-            main.extend(
-                [
-                    f'resource "google_compute_firewall" "{tf_name}_internal" {{',
-                    f'  name    = "${{var.name_prefix}}-{tf_name}-internal"',
-                    f"  network = google_compute_network.{network_name}.name",
-                    "",
-                    "  allow {",
-                    "    protocol = \"tcp\"",
-                    "    ports    = [\"80\", \"443\", \"5432\"]",
-                    "  }",
-                    "",
-                    "  source_ranges = [\"10.0.0.0/8\"]",
-                    "}",
-                    "",
-                ]
-            )
-
-        elif resource.aws_type in {"AWS::EC2::Instance", "AWS::EC2::LaunchTemplate"}:
-            subnet_ref = _tf_ref(props.get("SubnetId")) or next(iter(subnet_by_logical.keys()), "")
-            subnet_name = subnet_by_logical.get(subnet_ref, next(iter(subnet_by_logical.values()), "private_app_subnet"))
-            image = "debian-cloud/debian-12"
-            instance_type = _string(props.get("InstanceType"), "e2-medium")
-            if resource.aws_type == "AWS::EC2::LaunchTemplate":
-                launch_data = props.get("LaunchTemplateData", {}) if isinstance(props.get("LaunchTemplateData"), dict) else {}
-                instance_type = _string(launch_data.get("InstanceType"), "e2-medium")
-                main.extend(
-                    [
-                        f'resource "google_compute_instance_template" "{tf_name}" {{',
-                        f'  name_prefix  = "${{var.name_prefix}}-{tf_name}-"',
-                        f'  machine_type = "{instance_type if instance_type.startswith("e2-") else "e2-medium"}"',
-                        "",
-                        "  disk {",
-                        f'    source_image = "{image}"',
-                        "    auto_delete  = true",
-                        "    boot         = true",
-                        "  }",
-                        "",
-                        "  network_interface {",
-                        f"    subnetwork = google_compute_subnetwork.{subnet_name}.id",
-                        "  }",
-                        "}",
-                        "",
-                    ]
-                )
-            else:
-                main.extend(
-                    [
-                        f'resource "google_compute_instance" "{tf_name}" {{',
-                        f'  name         = "${{var.name_prefix}}-{tf_name}"',
-                        f'  machine_type = "{instance_type if instance_type.startswith("e2-") else "e2-medium"}"',
-                        "  zone         = var.zone",
-                        "",
-                        "  boot_disk {",
-                        "    initialize_params {",
-                        f'      image = "{image}"',
-                        "    }",
-                        "  }",
-                        "",
-                        "  network_interface {",
-                        f"    subnetwork = google_compute_subnetwork.{subnet_name}.id",
-                        "  }",
-                        "}",
-                        "",
-                    ]
-                )
-
-        elif resource.aws_type == "AWS::RDS::DBInstance":
-            engine_version = _string(props.get("EngineVersion"), "POSTGRES_15")
-            if engine_version and not engine_version.upper().startswith("POSTGRES"):
-                engine_version = f"POSTGRES_{engine_version.split('.')[0]}"
-            main.extend(
-                [
-                    f'resource "google_sql_database_instance" "{tf_name}" {{',
-                    f'  name             = "${{var.name_prefix}}-{tf_name}"',
-                    f'  database_version = "{engine_version or "POSTGRES_15"}"',
-                    "  region           = var.region",
-                    "",
-                    "  settings {",
-                    "    tier              = \"db-custom-1-3840\"",
-                    "    availability_type = \"REGIONAL\"",
-                    "    backup_configuration {",
-                    "      enabled                        = true",
-                    "      point_in_time_recovery_enabled = true",
-                    "    }",
-                    "    ip_configuration {",
-                    "      ipv4_enabled    = false",
-                    f"      private_network = google_compute_network.{next(iter(network_by_logical.values()), 'main_vpc')}.id",
-                    "    }",
-                    "  }",
-                    "",
-                    "  deletion_protection = true",
-                    "}",
-                    "",
-                ]
-            )
-            outputs.extend(
-                [
-                    f'output "{tf_name}_connection_name" {{',
-                    f"  value = google_sql_database_instance.{tf_name}.connection_name",
-                    "}",
-                    "",
-                ]
-            )
-
-        elif resource.aws_type == "AWS::S3::Bucket":
-            main.extend(
-                [
-                    f'resource "google_storage_bucket" "{tf_name}" {{',
-                    f'  name                        = "${{var.project_id}}-${{var.name_prefix}}-{tf_name}"',
-                    "  location                    = var.region",
-                    "  uniform_bucket_level_access = true",
-                    "  public_access_prevention    = \"enforced\"",
-                    "  force_destroy               = false",
-                    "",
-                    "  versioning {",
-                    "    enabled = true",
-                    "  }",
-                    "}",
-                    "",
-                ]
-            )
-            outputs.extend(
-                [
-                    f'output "{tf_name}_bucket_name" {{',
-                    f"  value = google_storage_bucket.{tf_name}.name",
-                    "}",
-                    "",
-                ]
-            )
-
-        elif resource.aws_type == "AWS::IAM::Role":
-            service_account_emitted = True
-            first_service_account_name = tf_name
-            iam.extend(
-                [
-                    f'resource "google_service_account" "{tf_name}" {{',
-                    f'  account_id   = "${{var.name_prefix}}-{tf_name}"',
-                    f'  display_name = "Service account migrated from {resource.logical_id}"',
-                    "}",
-                    "",
-                    f'resource "google_project_iam_member" "{tf_name}_logging" {{',
-                    "  project = var.project_id",
-                    "  role    = \"roles/logging.logWriter\"",
-                    f'  member  = "serviceAccount:${{google_service_account.{tf_name}.email}}"',
-                    "}",
-                    "",
-                ]
-            )
-
-        elif resource.aws_type in {"AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"}:
-            role_name = first_service_account_name
-            if not service_account_emitted:
-                service_account_emitted = True
-                role_name = "app_service_account"
-                first_service_account_name = role_name
-                iam.extend(
-                    [
-                        'resource "google_service_account" "app_service_account" {',
-                        '  account_id   = "${var.name_prefix}-app"',
-                        '  display_name = "Application service account"',
-                        "}",
-                        "",
-                    ]
-                )
-            iam.extend(
-                [
-                    f'resource "google_project_iam_member" "{tf_name}_storage_viewer" {{',
-                    "  project = var.project_id",
-                    "  role    = \"roles/storage.objectViewer\"",
-                    f'  member  = "serviceAccount:${{google_service_account.{role_name}.email}}"',
-                    "}",
-                    "",
-                ]
-            )
-
-    variables_tf = """variable "project_id" {
-  description = "Google Cloud project id."
-  type        = string
-}
-
-variable "region" {
-  description = "Google Cloud region for regional resources."
-  type        = string
-  default     = "us-central1"
-}
-
-variable "zone" {
-  description = "Google Cloud zone for zonal Compute Engine resources."
-  type        = string
-  default     = "us-central1-a"
-}
-
-variable "name_prefix" {
-  description = "Short, lowercase prefix for generated resource names."
-  type        = string
-  default     = "cloudbridge"
-}
-"""
-
-    if parsed.warnings:
-        summary.extend(["", "## Parser warnings", ""])
-        summary.extend(f"- {warning}" for warning in parsed.warnings)
-
-    summary.extend(
-        [
-            "",
-            "## Review notes",
-            "",
-            "- Validate networking, routing, and private service access before applying.",
-            "- Replace starter machine tiers with workload-appropriate sizing.",
-            "- Review IAM bindings against least-privilege requirements.",
-        ]
-    )
-
-    return TerraformBundle(
-        main_tf="\n".join(main).rstrip() + "\n",
-        variables_tf=variables_tf,
-        iam_tf="\n".join(iam).rstrip() + ("\n" if iam else ""),
-        outputs_tf="\n".join(outputs).rstrip() + ("\n" if outputs else ""),
-        architecture_summary_md="\n".join(summary).rstrip() + "\n",
-    )
-
-
-def generate_terraform_tool(parsed_json: dict[str, Any]) -> dict[str, Any]:
-    """ADK tool: generate Terraform files from parsed CloudFormation resources."""
-    return generate_terraform(parsed_json).model_dump()
-
-
-def compliance_check(node_input: TerraformBundle | dict[str, Any] | str) -> ComplianceResult:
-    """Run the README compliance checks against generated Terraform."""
-    if isinstance(node_input, TerraformBundle):
-        text = "\n".join([node_input.main_tf, node_input.iam_tf, node_input.variables_tf, node_input.outputs_tf])
-    elif isinstance(node_input, dict):
-        text = "\n".join(str(v) for v in node_input.values())
-    else:
-        text = node_input
-
-    findings: list[ComplianceFinding] = []
-    lower = text.lower()
-
-    if re.search(r"roles/(owner|editor|iam\.securityadmin)", lower) or ("*" in lower and "iam" in lower):
-        findings.append(
-            ComplianceFinding(
-                rule_id="IAM_NO_WILDCARD",
-                severity="HIGH",
-                resource="iam.tf",
-                issue="Broad IAM role or wildcard-like permission detected.",
-                recommended_fix="Use least-privilege predefined roles such as roles/storage.objectViewer or roles/cloudsql.client.",
-            )
-        )
-
-    if "google_sql_database_instance" in lower and ("ipv4_enabled = true" in lower or "authorized_networks" in lower):
-        findings.append(
-            ComplianceFinding(
-                rule_id="DB_NO_PUBLIC_IP",
-                severity="HIGH",
-                resource="Cloud SQL",
-                issue="Cloud SQL appears to allow public IP or authorized public networks.",
-                recommended_fix="Set ipv4_enabled = false and use private IP connectivity.",
-            )
-        )
-
-    if "google_storage_bucket" in lower and "uniform_bucket_level_access" not in lower:
-        findings.append(
-            ComplianceFinding(
-                rule_id="STORAGE_DEFAULT_PROTECTION",
-                severity="MEDIUM",
-                resource="Cloud Storage",
-                issue="Bucket is missing uniform bucket-level access in generated Terraform.",
-                recommended_fix="Add uniform_bucket_level_access = true to every google_storage_bucket.",
-            )
-        )
-
-    if "google_storage_bucket" in lower and "public_access_prevention" not in lower:
-        findings.append(
-            ComplianceFinding(
-                rule_id="STORAGE_PUBLIC_ACCESS_PREVENTION",
-                severity="MEDIUM",
-                resource="Cloud Storage",
-                issue="Bucket is missing public access prevention.",
-                recommended_fix='Add public_access_prevention = "enforced" to every google_storage_bucket.',
-            )
-        )
-
-    if "google_sql_database_instance" in lower and "backup_configuration" not in lower:
-        findings.append(
-            ComplianceFinding(
-                rule_id="DB_BACKUPS_REQUIRED",
-                severity="MEDIUM",
-                resource="Cloud SQL",
-                issue="Cloud SQL backup settings are not documented or enabled.",
-                recommended_fix="Enable backup_configuration and point-in-time recovery for Cloud SQL.",
-            )
-        )
-
-    return ComplianceResult(status="FAIL" if findings else "PASS", findings=findings)
-
-
-def compliance_check_tool(terraform_text: str) -> dict[str, Any]:
-    """ADK tool: run compliance checks against Terraform text."""
-    return compliance_check(terraform_text).model_dump()
-
-
-def _compliance_report(compliance: ComplianceResult) -> str:
-    report = [f"Status: {compliance.status}", "", "Findings:"]
-    if compliance.findings:
-        for finding in compliance.findings:
-            report.append(f"- {finding.rule_id} [{finding.severity}] {finding.resource}: {finding.issue}")
-            report.append(f"  Fix: {finding.recommended_fix}")
-    else:
-        report.append("- None")
-    return "\n".join(report) + "\n"
-
-
-def package_output(bundle: TerraformBundle, parsed: ResourceList | None = None, translation: TranslationPlan | None = None) -> FinalPackage:
-    compliance = compliance_check(bundle)
-    files = {
-        "main.tf": bundle.main_tf,
-        "variables.tf": bundle.variables_tf,
-        "iam.tf": bundle.iam_tf,
-        "outputs.tf": bundle.outputs_tf,
-        "architecture_summary.md": bundle.architecture_summary_md,
-        "compliance_report.md": _compliance_report(compliance),
+MODEL = _gemini_model()
+
+SCOPE_INSTRUCTION = """
+Stay strictly inside CloudBridge scope:
+- AWS CloudFormation inputs and AWS architecture/security posture
+- AWS-to-GCP service/resource mapping
+- GCP Terraform outputs
+- compliance findings and recommended remediation
+- generated migration documentation and diagrams
+If the user asks for anything unrelated, politely refuse and restate the CloudBridge tasks you can help with.
+""".strip()
+
+project_browser_agent = Agent(
+    name="project_browser_agent",
+    model=MODEL,
+    description="Lists and reads CloudBridge project files.",
+    tools=[list_project_files, read_project_file],
+    instruction=f"""
+{SCOPE_INSTRUCTION}
+
+You inspect CloudBridge files only. Use list_project_files and read_project_file.
+Answer file, README, input, output, diagram, greeting, and help requests.
+Do not analyze pasted templates deeply, generate Terraform, run compliance, or write files.
+""".strip(),
+)
+
+aws_source_analyst_agent = Agent(
+    name="aws_source_analyst_agent",
+    model=MODEL,
+    description="Analyzes CloudFormation source architecture and AWS security posture.",
+    tools=[read_project_file, parse_cloudformation],
+    instruction=f"""
+{SCOPE_INSTRUCTION}
+
+Analyze CloudFormation YAML/JSON. If given a path, read it. If given template text, parse it.
+Explain AWS resources, architecture tiers, dependencies, data flows, and AWS risks.
+Call out public S3, open security groups, open NACLs, public databases, wildcard IAM, missing encryption, and missing backups.
+Do not generate Terraform and do not write files.
+""".strip(),
+)
+
+conversion_agent = Agent(
+    name="conversion_agent",
+    model=MODEL,
+    description="Maps AWS CloudFormation resources to GCP architecture equivalents.",
+    tools=[parse_cloudformation],
+    instruction=f"""
+{SCOPE_INSTRUCTION}
+
+Create the AWS-to-GCP architecture mapping. Use parse_cloudformation for source facts.
+Map the supported MVP resources:
+- VPC -> google_compute_network
+- Subnet -> google_compute_subnetwork
+- SecurityGroup/NACL intent -> google_compute_firewall
+- EC2/LaunchTemplate -> Compute Engine instance/template/MIG recommendation
+- RDS PostgreSQL -> Cloud SQL PostgreSQL
+- S3 -> Cloud Storage
+- IAM Role/Policy -> Service Account + IAM bindings
+Return assumptions, unresolved migration choices, and risks. Do not write files.
+""".strip(),
+)
+
+terraform_generator_agent = Agent(
+    name="terraform_generator_agent",
+    model=MODEL,
+    description="Generates starter GCP Terraform bundles from CloudFormation.",
+    tools=[build_conversion_bundle],
+    instruction=f"""
+{SCOPE_INSTRUCTION}
+
+Generate starter Terraform by calling build_conversion_bundle with the input template path or pasted template.
+Return concise proposed file names plus important excerpts; do not dump every file unless the user asks.
+Prefer private Cloud SQL, protected Cloud Storage, least-privilege IAM, and readable small files.
+Do not write files.
+""".strip(),
+)
+
+compliance_reviewer_agent = Agent(
+    name="compliance_reviewer_agent",
+    model=MODEL,
+    description="Reviews AWS source and GCP Terraform for security/compliance findings.",
+    tools=[run_compliance_review, build_conversion_bundle],
+    instruction=f"""
+{SCOPE_INSTRUCTION}
+
+Review AWS source and generated GCP Terraform. If Terraform is not supplied, call build_conversion_bundle first, then review.
+Use run_compliance_review and return status PASS/FAIL, severity, affected resource, issue, and recommended fix.
+Focus on public buckets, open network rules, public databases, wildcard IAM, missing backups, encryption, and deletion protection.
+Do not write files.
+""".strip(),
+)
+
+human_approval_writer_agent = Agent(
+    name="human_approval_writer_agent",
+    model=MODEL,
+    description="Requests human approval and writes CloudBridge output files only after approval.",
+    tools=[
+        get_user_choice,
+        build_conversion_bundle,
+        write_project_files_after_approval,
+    ],
+    instruction=f"""
+{SCOPE_INSTRUCTION}
+
+You handle file changes. Never write, overwrite, delete, or modify files without explicit human approval.
+For a conversion write request:
+1. Call build_conversion_bundle to get proposed output files.
+2. Summarize files to be written under output/ and the compliance status.
+3. Ask the human to choose approve, revise, or cancel using get_user_choice.
+4. Only call write_project_files_after_approval when the approval choice is approve/approved.
+If the user wants revisions, explain what you need changed and do not write.
+""".strip(),
+)
+
+specialist_agents = [
+    project_browser_agent,
+    aws_source_analyst_agent,
+    conversion_agent,
+    terraform_generator_agent,
+    compliance_reviewer_agent,
+    human_approval_writer_agent,
+]
+
+# The same specialist can appear in multiple graph branches. Branch-specific
+# node names keep browsing/analyze/compliance requests from falling through into
+# the full conversion-and-write path.
+aws_source_analyst_for_conversion = node(
+    aws_source_analyst_agent,
+    name="aws_source_analyst_for_conversion",
+)
+compliance_reviewer_for_conversion = node(
+    compliance_reviewer_agent,
+    name="compliance_reviewer_for_conversion",
+)
+
+
+@node(name="request_router")
+def request_router(node_input: str) -> Any:
+    """Tiny graph router; specialist agents perform the actual work."""
+    text = str(node_input or "")
+    lowered = text.lower()
+    payload = {
+        "request": text,
+        "default_template": "input/sample-three-tier.yaml",
+        "insecure_template": "input/sample-three-tier-insecure.yaml",
+        "scope": "CloudBridge AWS CloudFormation to Google Cloud Terraform architecture migration",
     }
-    return FinalPackage(files=files, compliance=compliance, parsed=parsed, translation=translation)
 
-
-def write_output_files(files: dict[str, str], output_dir: str = "output") -> dict[str, str]:
-    """ADK tool: write generated files to the local output/ directory."""
-    target = (REPO_ROOT / output_dir).resolve()
-    repo = REPO_ROOT.resolve()
-    if repo not in [target, *target.parents]:
-        raise ValueError("output_dir must stay inside the repository")
-    target.mkdir(parents=True, exist_ok=True)
-    written: dict[str, str] = {}
-    for name, content in files.items():
-        safe_name = Path(name).name
-        path = target / safe_name
-        path.write_text(content)
-        written[safe_name] = str(path.relative_to(repo))
-    return written
-
-
-def convert_cloudformation_to_gcp(template: str, write_files: bool = False) -> dict[str, Any]:
-    """ADK tool: end-to-end CloudFormation to GCP Terraform conversion.
-
-    Args:
-        template: CloudFormation YAML or JSON text.
-        write_files: When true, also writes output files under output/ for a
-            local demo run. In Agent Engine this may write to ephemeral storage.
-    """
-    parsed = parse_cfn(template)
-    translation = translate_resources(parsed)
-    bundle = generate_terraform(parsed)
-    final = package_output(bundle, parsed=parsed, translation=translation)
-    if write_files:
-        final.output_dir = "output"
-        write_output_files(final.files, "output")
-    return final.model_dump()
-
-
-def convert_input_file_to_gcp(filename: str = "sample-three-tier.yaml", write_files: bool = True) -> dict[str, Any]:
-    """ADK tool: convert a template from input/ and optionally write output/."""
-    template = read_input_template(filename)
-    return convert_cloudformation_to_gcp(template, write_files=write_files)
-
-
-def _content_text(content: types.Content | None) -> str:
-    if not content or not content.parts:
-        return ""
-    return "\n".join(part.text or "" for part in content.parts if getattr(part, "text", None))
-
-
-def _extract_template_text(message: str) -> str:
-    fenced = re.search(r"```(?:yaml|yml|json|cloudformation)?\s*(.*?)```", message, re.DOTALL | re.IGNORECASE)
-    return fenced.group(1).strip() if fenced else message.strip()
-
-
-def _wants_file_write(message: str) -> bool:
-    lowered = message.lower()
-    return any(word in lowered for word in ["write", "save", "output/", "output dir", "local file"])
-
-
-def _safe_project_path(path_text: str) -> Path:
-    requested = path_text.strip().strip("`'\"")
-    requested = requested.removeprefix("./")
-    path = (REPO_ROOT / requested).resolve()
-    repo = REPO_ROOT.resolve()
-    if repo not in [path, *path.parents]:
-        raise ValueError("Path must stay inside this CloudBridge project.")
-    if path.is_dir():
-        raise ValueError("Please ask for a specific file, not a directory.")
-    return path
-
-
-def _project_file_candidates() -> list[Path]:
-    candidates: list[Path] = []
-    for directory in [INPUT_DIR, OUTPUT_DIR]:
-        if directory.exists():
-            candidates.extend(sorted(path for path in directory.iterdir() if path.is_file()))
-    candidates.extend([REPO_ROOT / "README.md", REPO_ROOT / "app" / "agent.py"])
-    return candidates
-
-
-def _find_referenced_file(message: str) -> Path | None:
-    lowered = message.lower()
-    explicit = re.search(r"((?:input|output)/[A-Za-z0-9_.-]+)", message)
-    if explicit:
-        return _safe_project_path(explicit.group(1))
-
-    for path in _project_file_candidates():
-        if path.name.lower() in lowered:
-            return path
-
-    aliases = {
-        "main terraform": OUTPUT_DIR / "main.tf",
-        "terraform main": OUTPUT_DIR / "main.tf",
-        "variables": OUTPUT_DIR / "variables.tf",
-        "iam": OUTPUT_DIR / "iam.tf",
-        "outputs": OUTPUT_DIR / "outputs.tf",
-        "architecture summary": OUTPUT_DIR / "architecture_summary.md",
-        "ascii": OUTPUT_DIR / "aws-to-gcp-ascii-flow.md",
-        "flow": OUTPUT_DIR / "aws-to-gcp-ascii-flow.md",
-        "compliance": OUTPUT_DIR / "compliance_report.md",
-    }
-    for phrase, path in aliases.items():
-        if phrase in lowered:
-            return path
-    return None
-
-
-def _list_files(directory: Path, label: str) -> str:
-    if not directory.exists():
-        return f"No `{label}/` directory exists yet."
-    files = sorted(path.name for path in directory.iterdir() if path.is_file())
-    if not files:
-        return f"`{label}/` is empty."
-    return f"Files in `{label}/`:\n" + "\n".join(f"- `{label}/{name}`" for name in files)
-
-
-def _read_project_file(path: Path) -> str:
-    if not path.exists():
-        return f"I could not find `{path.relative_to(REPO_ROOT)}`."
-    text = path.read_text()
-    fence = "hcl" if path.suffix == ".tf" else "yaml" if path.suffix in {".yaml", ".yml"} else "markdown"
-    return f"Here is `{path.relative_to(REPO_ROOT)}`:\n\n```{fence}\n{text.rstrip()}\n```"
-
-
-def _summarize_current_architecture() -> str:
-    template = read_input_template("sample-three-tier.yaml")
-    parsed = parse_cfn(template)
-    translation = translate_resources(parsed)
-    rows = [
-        "# CloudBridge architecture view",
-        "",
-        "This project demonstrates AWS CloudFormation to GCP Terraform conversion for a three-tier app.",
-        "",
-        "| AWS logical id | AWS type | GCP target |",
-        "| --- | --- | --- |",
-    ]
-    for item in translation.mappings:
-        rows.append(f"| `{item.aws_logical_id}` | `{item.aws_type}` | `{item.gcp_resource_type}` |")
-    rows.extend(
-        [
-            "",
-            "Key generated outputs live in `output/`: Terraform files, architecture summary, compliance report, and AWS-to-GCP ASCII flow.",
-        ]
-    )
-    return "\n".join(rows)
-
-
-def _explain_insecure_sample() -> str:
-    return _read_project_file(OUTPUT_DIR / "insecure-sample-expected-compliance-report.md")
-
-
-def _help_response() -> str:
-    return """Hi — I am CloudBridge, focused only on this AWS-to-GCP architecture project.
-
-You can ask me to:
-- show files: `show input/sample-three-tier.yaml`, `show output/main.tf`, `show the ASCII flow`
-- list project artifacts: `list input files`, `list output files`
-- convert templates: `convert input/sample-three-tier.yaml`, `convert input/sample-three-tier-insecure.yaml`
-- explain architecture: `summarize the AWS to GCP mapping`, `what is in the GCP output?`
-- review compliance: `show compliance report`, `what problems are in the insecure sample?`
-
-I will stay on CloudBridge architecture, CloudFormation, Terraform, GCP mapping, and compliance topics."""
-
-
-def _is_architecture_topic(message: str) -> bool:
-    lowered = message.lower()
-    keywords = [
-        "aws",
-        "gcp",
-        "google cloud",
-        "cloudformation",
-        "terraform",
-        "architecture",
+    browse_words = (
+        "list",
+        "show",
+        "read",
+        "file",
+        "files",
+        "readme",
         "input",
         "output",
-        "s3",
-        "bucket",
-        "security group",
-        "nacl",
-        "iam",
-        "rds",
-        "cloud sql",
-        "vpc",
-        "subnet",
-        "compliance",
-        "mapping",
-        "flow",
         "diagram",
-        "main.tf",
-        "variables.tf",
-        "outputs.tf",
-        "iam.tf",
-        "sample",
+        "help",
+        "hello",
+        "hi",
+    )
+    analyze_words = (
+        "explain",
+        "analyze",
+        "analyse",
+        "architecture",
+        "aws template",
+        "cloudformation",
+    )
+    compliance_words = (
+        "compliance",
+        "security",
+        "risk",
+        "ato",
+        "finding",
+        "findings",
         "insecure",
+        "review",
+    )
+    convert_words = (
         "convert",
-        "show",
-        "list",
-        "file",
-        "change",
-        "modify",
-        "update",
-    ]
-    greetings = {"hi", "hello", "hey", "help", "start"}
-    return lowered.strip() in greetings or any(keyword in lowered for keyword in keywords)
+        "terraform",
+        "gcp",
+        "google cloud",
+        "migrate",
+        "migration",
+        "generate",
+        "write",
+    )
+    unrelated_words = ("sky", "weather", "joke", "recipe", "sports", "stock", "movie")
+
+    from google.adk.events import Event
+
+    if any(word in lowered for word in unrelated_words):
+        yield Event(output=payload, route="browse")
+    elif any(word in lowered for word in browse_words) and not any(
+        word in lowered for word in convert_words
+    ):
+        yield Event(output=payload, route="browse")
+    elif any(word in lowered for word in convert_words):
+        yield Event(output=payload, route="convert")
+    elif any(word in lowered for word in compliance_words):
+        yield Event(output=payload, route="compliance")
+    elif any(word in lowered for word in analyze_words):
+        yield Event(output=payload, route="analyze")
+    elif any(word in lowered for word in browse_words) or len(lowered.strip()) < 20:
+        yield Event(output=payload, route="browse")
+    else:
+        yield Event(output=payload, route="analyze")
 
 
-def _cloudbridge_response(message: str) -> str:
-    lowered = message.lower().strip()
-
-    if not lowered or lowered in {"hi", "hello", "hey", "help", "start"}:
-        return _help_response()
-
-    if not _is_architecture_topic(message):
-        return (
-            "I can only help with this CloudBridge architecture project: AWS CloudFormation inputs, "
-            "GCP Terraform outputs, AWS-to-GCP mapping, and compliance. Ask me to list input/output files, "
-            "show a file, convert a template, or explain the architecture."
-        )
-
-    if "list" in lowered and "input" in lowered:
-        return _list_files(INPUT_DIR, "input")
-    if "list" in lowered and "output" in lowered:
-        return _list_files(OUTPUT_DIR, "output")
-
-    if any(word in lowered for word in ["show", "display", "open", "read", "view", "what is in"]):
-        path = _find_referenced_file(message)
-        if path:
-            return _read_project_file(path)
-        if "input" in lowered:
-            return _list_files(INPUT_DIR, "input")
-        if "output" in lowered:
-            return _list_files(OUTPUT_DIR, "output")
-
-    if "problem" in lowered or "finding" in lowered or ("insecure" in lowered and "convert" not in lowered):
-        return _explain_insecure_sample()
-
-    if "sample-three-tier-insecure" in lowered or "insecure sample" in lowered and "convert" in lowered:
-        final = convert_input_file_to_gcp("sample-three-tier-insecure.yaml", write_files=True)
-        return _format_final_package(final)
-
-    if "sample-three-tier" in lowered or "sample three tier" in lowered:
-        final = convert_input_file_to_gcp("sample-three-tier.yaml", write_files=True)
-        return _format_final_package(final)
-
-    if "resources:" in lowered or "awstemplateformatversion" in lowered:
-        template = _extract_template_text(message)
-        final = convert_cloudformation_to_gcp(template, write_files=_wants_file_write(message))
-        return _format_final_package(final)
-
-    if any(word in lowered for word in ["architecture", "mapping", "compare", "aws to gcp", "gcp output", "diagram", "flow"]):
-        if "ascii" in lowered or "diagram" in lowered or "flow" in lowered:
-            return _read_project_file(OUTPUT_DIR / "aws-to-gcp-ascii-flow.md")
-        return _summarize_current_architecture()
-
-    if "compliance" in lowered:
-        return _read_project_file(OUTPUT_DIR / "compliance_report.md")
-
-    if any(word in lowered for word in ["change", "modify", "update"]):
-        return (
-            "I can help make architecture-scoped changes safely. Tell me the target file and the desired "
-            "AWS/GCP architecture change, for example: `update the input template to add a private app subnet` "
-            "or `regenerate output from input/sample-three-tier-insecure.yaml`. For now, I can show files, "
-            "convert templates, regenerate outputs, and explain the changes to make."
-        )
-
-    return _help_response()
-
-
-def _format_final_package(final: dict[str, Any]) -> str:
-    files = final.get("files", {})
-    compliance = final.get("compliance", {})
-    parsed = final.get("parsed") or {}
-    resources = parsed.get("resources", [])
-    unsupported = parsed.get("unsupported", [])
-    output_dir = final.get("output_dir")
-
-    lines = [
-        "# CloudBridge conversion complete",
-        "",
-        f"Compliance status: **{compliance.get('status', 'UNKNOWN')}**",
-        "",
-        f"Supported resources parsed: **{len(resources)}**",
-        f"Unsupported resources: **{len(unsupported)}**",
-    ]
-    if output_dir:
-        lines.append(f"Files were written under `{output_dir}/`.")
-    lines.extend(["", "## Generated files", ""])
-    for name, content in files.items():
-        fence = "hcl" if name.endswith(".tf") else "markdown"
-        lines.extend([f"### `{name}`", "", f"```{fence}", str(content).rstrip(), "```", ""])
-    return "\n".join(lines).rstrip() + "\n"
-
-
-class CloudBridgeAgent(BaseAgent):
-    """Deterministic ADK agent for the playground.
-
-    This avoids any Gemini API-key/Vertex backend ambiguity in `make playground`.
-    The conversion is intentionally deterministic for the hackathon demo; the
-    LLM specialist agents below remain available for future Agent Engine work,
-    but the playground root path does not require a model call.
-    """
-
-    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        message = _content_text(ctx.user_content)
-
-        try:
-            response = _cloudbridge_response(message)
-        except Exception as exc:
-            response = f"CloudBridge could not complete that architecture request: {exc}"
-
-        yield Event(
-            author=self.name,
-            invocation_id=ctx.invocation_id,
-            content=types.Content(
-                role="model",
-                parts=[types.Part.from_text(text=response)],
-            ),
-        )
-
-
-translation_agent = Agent(
-    name="translation_agent",
-    model=_gemini_model(),
-    description="Maps supported AWS CloudFormation resources to Google Cloud targets.",
-    input_schema=ResourceList,
-    output_schema=TranslationPlan,
-    instruction="""
-You map a small supported CloudFormation resource list to Google Cloud.
-Use only the MVP mapping catalog. Preserve architecture intent, explain any
-assumptions, and return valid TranslationPlan JSON only.
-""".strip(),
+root_agent = Workflow(
+    name="cloudbridge_architect",
+    description="Graph-based CloudBridge multi-agent AWS-to-GCP migration workflow.",
+    edges=[
+        (START, request_router),
+        (
+            request_router,
+            {
+                "browse": project_browser_agent,
+                "analyze": aws_source_analyst_agent,
+                "compliance": compliance_reviewer_agent,
+                "convert": aws_source_analyst_for_conversion,
+            },
+        ),
+        (aws_source_analyst_for_conversion, conversion_agent),
+        (conversion_agent, terraform_generator_agent),
+        (terraform_generator_agent, compliance_reviewer_for_conversion),
+        (compliance_reviewer_for_conversion, human_approval_writer_agent),
+    ],
 )
 
-terraform_agent = Agent(
-    name="terraform_agent",
-    model=_gemini_model(),
-    description="Generates starter Google Terraform from a CloudBridge TranslationPlan.",
-    input_schema=TranslationPlan,
-    output_schema=TerraformBundle,
-    instruction="""
-Generate starter Google Terraform for the TranslationPlan.
-Keep files small and readable: main.tf, variables.tf, iam.tf, outputs.tf, and
-architecture_summary.md. Prefer private Cloud SQL, uniform bucket-level access,
-public access prevention, and least-privilege IAM. Return valid TerraformBundle
-JSON only.
-""".strip(),
-)
+cloudbridge_architect = root_agent
 
-fix_agent = Agent(
-    name="fix_agent",
-    model=_gemini_model(),
-    description="Applies minimal fixes for CloudBridge compliance findings.",
-    output_schema=TerraformBundle,
-    instruction="""
-Apply only compliance fixes needed for the demo rules:
-1. remove public Cloud SQL exposure,
-2. replace broad IAM with least-privilege roles,
-3. add Cloud Storage uniform bucket-level access and public access prevention,
-4. enable or document database backups.
-Return the corrected TerraformBundle JSON only.
-""".strip(),
-)
+app = App(root_agent=root_agent, name="app")
 
-root_agent = CloudBridgeAgent(
-    name="cloudbridge",
-    description="Deterministic AWS CloudFormation to GCP Terraform and compliance report agent.",
-)
-
-app = App(
-    root_agent=root_agent,
-    name="app",
-)
+__all__ = [
+    "app",
+    "aws_source_analyst_agent",
+    "cloudbridge_architect",
+    "compliance_reviewer_agent",
+    "conversion_agent",
+    "convert_cloudformation_to_gcp",
+    "human_approval_writer_agent",
+    "project_browser_agent",
+    "read_input_template",
+    "root_agent",
+    "specialist_agents",
+    "terraform_generator_agent",
+]

@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from app.agent import (
-    _cloudbridge_response,
-    convert_cloudformation_to_gcp,
-    parse_cfn,
-    read_input_template,
-)
+import pytest
+
+from app.agent import convert_cloudformation_to_gcp, read_input_template
+from app.cloudbridge_tools import read_project_file, run_compliance_review
+from app.compliance import compliance_check
+from app.parser import parse_cfn
 
 
 def test_parse_sample_three_tier_template() -> None:
@@ -38,23 +38,28 @@ def test_convert_sample_template_returns_expected_files() -> None:
     assert "Status: PASS" in result["files"]["compliance_report.md"]
 
 
-def test_chat_help_is_architecture_focused_not_repetitive() -> None:
-    response = _cloudbridge_response("hello")
-
-    assert "CloudBridge" in response
-    assert "show files" in response
-    assert "list output files" in response
-    assert "AWS-to-GCP architecture" in response or "AWS-to-GCP" in response
+def test_compliance_detects_public_sql() -> None:
+    bad_tf = 'resource "google_sql_database_instance" "db" {\n  ipv4_enabled = true\n}'
+    result = compliance_check(bad_tf)
+    assert result.status == "FAIL"
+    assert any(f.rule_id == "DB_NO_PUBLIC_IP" for f in result.findings)
 
 
-def test_chat_can_show_output_file() -> None:
-    response = _cloudbridge_response("show output/main.tf")
+def test_compliance_passes_secure_tf() -> None:
+    good_tf = 'resource "google_compute_network" "vpc" {\n  name = "test"\n}'
+    result = compliance_check(good_tf)
+    assert result.status == "PASS"
 
-    assert "Here is `output/main.tf`" in response
-    assert "google_compute_network" in response
+
+def test_safe_project_file_rejects_path_escape() -> None:
+    with pytest.raises(ValueError):
+        read_project_file("../pyproject.toml")
 
 
-def test_chat_declines_unrelated_topics() -> None:
-    response = _cloudbridge_response("write me a poem about pizza")
-
-    assert "I can only help with this CloudBridge architecture project" in response
+def test_insecure_template_compliance_findings() -> None:
+    result = run_compliance_review("input/sample-three-tier-insecure.yaml")
+    assert result["status"] == "FAIL"
+    rule_ids = {finding["rule_id"] for finding in result["findings"]}
+    assert "AWS_SG_OPEN_TO_INTERNET" in rule_ids
+    assert "AWS_RDS_PUBLIC" in rule_ids
+    assert "AWS_IAM_WILDCARD_ADMIN" in rule_ids

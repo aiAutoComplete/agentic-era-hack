@@ -1,0 +1,317 @@
+"""Small, safe tools for the CloudBridge ADK agents."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from .compliance import compliance_check, compliance_report
+from .models import SUPPORTED_TYPES, FinalPackage, ResourceList, TerraformBundle
+from .parser import parse_cfn, translate_resources
+from .terraform_gen import generate_terraform
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+INPUT_DIR = REPO_ROOT / "input"
+OUTPUT_DIR = REPO_ROOT / "output"
+_ALLOWED_ROOTS = {
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "CLOUDBRIDGE_REDESIGN_NOTES.md",
+    REPO_ROOT / "input",
+    REPO_ROOT / "output",
+    REPO_ROOT / "app",
+}
+_BLOCKED_PARTS = {".git", ".venv", "__pycache__", ".adk"}
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_project_path(path: str) -> Path:
+    requested = (
+        (REPO_ROOT / path).resolve()
+        if not Path(path).is_absolute()
+        else Path(path).resolve()
+    )
+    if not _is_inside(requested, REPO_ROOT):
+        raise ValueError("Path must stay inside the CloudBridge repository.")
+    if any(part in _BLOCKED_PARTS for part in requested.parts):
+        raise ValueError("Path is blocked for safety.")
+    if not any(
+        requested == root.resolve() or _is_inside(requested, root)
+        for root in _ALLOWED_ROOTS
+    ):
+        raise ValueError("Path is outside the allowed CloudBridge project areas.")
+    return requested
+
+
+def _read_template_or_path(template_or_path: str) -> str:
+    candidate = template_or_path.strip()
+    if "\n" not in candidate and not candidate.lstrip().startswith(("{", "Resources:")):
+        path = _safe_project_path(candidate)
+        if path.exists() and path.is_file():
+            return path.read_text()
+    return template_or_path
+
+
+def _package_output(
+    bundle: TerraformBundle, parsed: ResourceList | None = None
+) -> FinalPackage:
+    result = compliance_check(bundle)
+    files = {
+        "main.tf": bundle.main_tf,
+        "variables.tf": bundle.variables_tf,
+        "iam.tf": bundle.iam_tf,
+        "outputs.tf": bundle.outputs_tf,
+        "architecture_summary.md": bundle.architecture_summary_md,
+        "compliance_report.md": compliance_report(result),
+    }
+    return FinalPackage(files=files, compliance=result, parsed=parsed)
+
+
+def list_project_files(scope: str = "all") -> list[str]:
+    """List CloudBridge files for a safe scope: input, output, app, or all."""
+    scope = scope.lower().strip()
+    roots: list[Path]
+    if scope == "input":
+        roots = [INPUT_DIR]
+    elif scope == "output":
+        roots = [OUTPUT_DIR]
+    elif scope == "app":
+        roots = [REPO_ROOT / "app"]
+    elif scope == "all":
+        roots = [REPO_ROOT / "README.md", INPUT_DIR, OUTPUT_DIR, REPO_ROOT / "app"]
+    else:
+        raise ValueError("scope must be one of: input, output, app, all")
+
+    files: list[str] = []
+    for root in roots:
+        if root.is_file():
+            files.append(str(root.relative_to(REPO_ROOT)))
+            continue
+        if root.exists():
+            for item in sorted(root.rglob("*")):
+                if item.is_file() and not any(
+                    part in _BLOCKED_PARTS for part in item.parts
+                ):
+                    files.append(str(item.relative_to(REPO_ROOT)))
+    return files
+
+
+def read_project_file(path: str) -> str:
+    """Read an allowed CloudBridge project file safely."""
+    safe_path = _safe_project_path(path)
+    if not safe_path.exists() or not safe_path.is_file():
+        raise FileNotFoundError(f"No readable CloudBridge file at {path!r}.")
+    return safe_path.read_text()
+
+
+def parse_cloudformation(template_or_path: str) -> dict[str, Any]:
+    """Parse CloudFormation YAML/JSON text or an allowed local path."""
+    template = _read_template_or_path(template_or_path)
+    parsed = parse_cfn(template)
+    translation = translate_resources(parsed)
+    return {
+        "supported_count": len(parsed.resources),
+        "unsupported_count": len(parsed.unsupported),
+        "resources": [resource.model_dump() for resource in parsed.resources],
+        "unsupported": [resource.model_dump() for resource in parsed.unsupported],
+        "mappings": [mapping.model_dump() for mapping in translation.mappings],
+        "warnings": parsed.warnings,
+        "supported_types": SUPPORTED_TYPES,
+    }
+
+
+def build_conversion_bundle(template_or_path: str) -> dict[str, Any]:
+    """Build a GCP Terraform conversion bundle without writing files."""
+    template = _read_template_or_path(template_or_path)
+    parsed = parse_cfn(template)
+    translation = translate_resources(parsed)
+    bundle = generate_terraform(parsed)
+    final = _package_output(bundle, parsed=parsed)
+    final.translation = translation
+    return final.model_dump()
+
+
+def _aws_source_findings(template_text: str) -> list[dict[str, str]]:
+    parsed = parse_cfn(template_text)
+    resources = [*parsed.resources, *parsed.unsupported]
+    findings: list[dict[str, str]] = []
+    for resource in resources:
+        props = resource.properties
+        body = json.dumps(props).lower()
+        logical_id = resource.logical_id
+
+        if (
+            resource.aws_type == "AWS::EC2::Subnet"
+            and props.get("MapPublicIpOnLaunch") is True
+        ):
+            findings.append(
+                {
+                    "rule_id": "AWS_SUBNET_PUBLIC_IP_AUTO_ASSIGN",
+                    "severity": "MEDIUM",
+                    "resource": logical_id,
+                    "issue": "Subnet auto-assigns public IPv4 addresses.",
+                    "recommended_fix": "Use private subnets for app/data tiers and explicit public ingress only at the edge.",
+                }
+            )
+        if resource.aws_type == "AWS::EC2::SecurityGroup" and "0.0.0.0/0" in body:
+            findings.append(
+                {
+                    "rule_id": "AWS_SG_OPEN_TO_INTERNET",
+                    "severity": "HIGH",
+                    "resource": logical_id,
+                    "issue": "Security group allows internet-sourced traffic.",
+                    "recommended_fix": "Restrict source ranges and ports to required trusted networks.",
+                }
+            )
+        if (
+            resource.aws_type == "AWS::EC2::NetworkAclEntry"
+            and "0.0.0.0/0" in body
+            and "allow" in body
+        ):
+            findings.append(
+                {
+                    "rule_id": "AWS_NACL_ALLOW_ALL",
+                    "severity": "HIGH",
+                    "resource": logical_id,
+                    "issue": "Network ACL entry allows broad internet traffic.",
+                    "recommended_fix": "Replace broad allow rules with least-privilege subnet ACLs.",
+                }
+            )
+        if resource.aws_type == "AWS::S3::Bucket" and (
+            "publicread" in body or ("blockpublic" in body and "false" in body)
+        ):
+            findings.append(
+                {
+                    "rule_id": "AWS_S3_PUBLIC_ACCESS",
+                    "severity": "HIGH",
+                    "resource": logical_id,
+                    "issue": "S3 bucket appears publicly readable or lacks public access blocks.",
+                    "recommended_fix": "Enable S3 Block Public Access and avoid public ACLs/policies.",
+                }
+            )
+        if (
+            resource.aws_type == "AWS::S3::BucketPolicy"
+            and "principal" in body
+            and "*" in body
+        ):
+            findings.append(
+                {
+                    "rule_id": "AWS_S3_POLICY_PUBLIC_PRINCIPAL",
+                    "severity": "HIGH",
+                    "resource": logical_id,
+                    "issue": "Bucket policy grants access to a public principal.",
+                    "recommended_fix": "Limit principals to named identities and required actions only.",
+                }
+            )
+        if (
+            resource.aws_type == "AWS::IAM::Role"
+            and '"action": "*"' in body
+            and '"resource": "*"' in body
+        ):
+            findings.append(
+                {
+                    "rule_id": "AWS_IAM_WILDCARD_ADMIN",
+                    "severity": "HIGH",
+                    "resource": logical_id,
+                    "issue": "IAM role contains wildcard administrative permissions.",
+                    "recommended_fix": "Replace wildcard permissions with least-privilege managed or custom policies.",
+                }
+            )
+        if resource.aws_type == "AWS::RDS::DBInstance":
+            if props.get("PubliclyAccessible") is True:
+                findings.append(
+                    {
+                        "rule_id": "AWS_RDS_PUBLIC",
+                        "severity": "HIGH",
+                        "resource": logical_id,
+                        "issue": "RDS instance is publicly accessible.",
+                        "recommended_fix": "Place database in private subnets and disable public accessibility.",
+                    }
+                )
+            if props.get("StorageEncrypted") is False:
+                findings.append(
+                    {
+                        "rule_id": "AWS_RDS_UNENCRYPTED",
+                        "severity": "HIGH",
+                        "resource": logical_id,
+                        "issue": "RDS storage encryption is disabled.",
+                        "recommended_fix": "Enable storage encryption with a managed KMS key.",
+                    }
+                )
+            if props.get("BackupRetentionPeriod") == 0:
+                findings.append(
+                    {
+                        "rule_id": "AWS_RDS_BACKUPS_DISABLED",
+                        "severity": "MEDIUM",
+                        "resource": logical_id,
+                        "issue": "RDS backups are disabled.",
+                        "recommended_fix": "Set a positive backup retention period and test restore procedures.",
+                    }
+                )
+    return findings
+
+
+def run_compliance_review(
+    template_or_path: str, terraform_text: str | None = None
+) -> dict[str, Any]:
+    """Review AWS source and optional generated Terraform for security/compliance findings."""
+    template = _read_template_or_path(template_or_path)
+    aws_findings = _aws_source_findings(template)
+    terraform_result = (
+        compliance_check(terraform_text or "") if terraform_text else None
+    )
+    terraform_findings = (
+        [finding.model_dump() for finding in terraform_result.findings]
+        if terraform_result
+        else []
+    )
+    all_findings = [*aws_findings, *terraform_findings]
+    return {
+        "status": "FAIL" if all_findings else "PASS",
+        "aws_findings": aws_findings,
+        "terraform_findings": terraform_findings,
+        "findings": all_findings,
+    }
+
+
+def write_project_files_after_approval(
+    files: dict[str, str], approval: str
+) -> dict[str, Any]:
+    """Write output files only when approval is exactly approve/approved."""
+    if approval.strip().lower() not in {"approve", "approved", "yes approve"}:
+        return {"status": "not_written", "reason": "Human approval was not explicit."}
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    written: dict[str, str] = {}
+    for name, content in files.items():
+        safe_name = Path(name).name
+        if safe_name != name:
+            raise ValueError("Output file names must not include directories.")
+        path = OUTPUT_DIR / safe_name
+        path.write_text(content)
+        written[safe_name] = str(path.relative_to(REPO_ROOT))
+    return {"status": "written", "files": written}
+
+
+# Backward-compatible helpers used by existing tests/imports.
+def read_input_template(filename: str = "sample-three-tier.yaml") -> str:
+    """Read a CloudFormation template from input/."""
+    return read_project_file(f"input/{Path(filename).name}")
+
+
+def convert_cloudformation_to_gcp(
+    template: str, write_files: bool = False
+) -> dict[str, Any]:
+    """Convert CloudFormation to GCP Terraform, optionally writing output/."""
+    result = build_conversion_bundle(template)
+    if write_files:
+        write_project_files_after_approval(result["files"], "approve")
+        result["output_dir"] = "output"
+    return result
