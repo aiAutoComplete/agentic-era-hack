@@ -128,6 +128,54 @@ One-line demo narrative:
 Open CloudBridge → chat/list/read files as needed → ask to convert input/sample-three-tier.yaml → the pipeline loads, maps, generates Terraform, and reviews compliance in one response.
 ```
 
+### What happens when you say “hi”
+
+The ADK app starts at `app/agent.py` with this root agent:
+
+```python
+root_agent = LlmAgent(name="cloudbridge_architect", ...)
+```
+
+When a user types a simple greeting like `hi`, ADK sends the message to
+`cloudbridge_architect` first. This is a conversational coordinator, not the
+conversion pipeline. Its instructions explicitly say not to run conversion for
+every message. So for `hi`, it should just greet the user, explain what
+CloudBridge can do, and ask what architecture task or input template the user
+wants to work with.
+
+```text
+User: hi
+  ↓
+cloudbridge_architect
+  ↓
+Conversational response only. No Terraform generation yet.
+```
+
+The full conversion flow lives in the same file as:
+
+```python
+conversion_pipeline = SequentialAgent(
+    sub_agents=[source_loader, translator, terraform_writer, compliance_reviewer]
+)
+```
+
+That pipeline runs only when the user clearly asks to convert, migrate, generate
+Terraform, or create a GCP bundle for a CloudFormation file.
+
+```text
+User: convert input/sample-three-tier-insecure.yaml to a GCP bundle
+  ↓
+cloudbridge_architect delegates to conversion_pipeline
+  ↓
+source_loader reads the CloudFormation template
+  ↓
+translator maps AWS resources and risks to Google Cloud architecture
+  ↓
+terraform_writer generates starter Terraform fenced blocks
+  ↓
+compliance_reviewer returns the final bundle plus PASS/FAIL findings
+```
+
 ---
 
 ## Compliance rules
@@ -166,21 +214,16 @@ cd /Users/bhatiar3/ai_projects/agentic-era-hack
 uv sync
 ```
 
-Run a local deterministic smoke conversion using the sample input template:
+Run tests:
 
 ```bash
-uv run python - <<'PY'
-from app.agent import convert_input_file_to_gcp
-result = convert_input_file_to_gcp("sample-three-tier.yaml", write_files=True)
-print(result["compliance"]["status"])
-print(sorted(result["files"]))
-PY
+make test
 ```
 
 Run the ADK web UI from the repository root:
 
 ```bash
-uv run adk web --port 8000
+make playground
 ```
 
 Then open:
@@ -189,7 +232,14 @@ Then open:
 http://localhost:8000
 ```
 
-Select the `app` / `cloudbridge` agent and paste a small CloudFormation template, or ask it to convert `input/sample-three-tier.yaml`.
+Select the `app` agent and ask questions like:
+
+```text
+hi
+list input files
+convert input/sample-three-tier.yaml to a GCP bundle
+review input/sample-three-tier-insecure.yaml
+```
 
 ---
 
@@ -232,15 +282,10 @@ Notes:
 
 ## Important ADK note
 
-The design follows the ADK docs for:
-
-- graph-based workflows: `https://adk.dev/workflows/`
-- collaborative agents: `https://adk.dev/workflows/collaboration/`
-
-The local virtual environment tested during scaffolding had `google-adk==1.33.0`, where ADK 2 `Workflow` / `Event` APIs were not exposed. The scaffold therefore supports both paths:
-
-- **ADK 2 available:** use the graph workflow.
-- **ADK 1.x only:** fall back to a coordinator agent with the same tools and specialist agents.
+The current demo uses Google ADK with a conversational `LlmAgent` root and a
+`SequentialAgent` conversion pipeline. The project pins ADK 2 beta in
+`pyproject.toml`, and `make playground` forces Vertex AI mode so the app uses the
+lab GCP project rather than a Gemini API key.
 
 ---
 
