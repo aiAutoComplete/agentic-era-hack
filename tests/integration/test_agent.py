@@ -25,13 +25,6 @@ def test_cloudbridge_graph_workflow_imports() -> None:
     assert root_agent.graph is not None
 
 
-def test_specialist_agents_are_registered() -> None:
+def test_cloudbridge_agent_is_registered() -> None:
     names = {agent.name for agent in specialist_agents}
-    assert names == {
-        "project_browser_agent",
-        "aws_source_analyst_agent",
-        "conversion_agent",
-        "terraform_generator_agent",
-        "compliance_reviewer_agent",
-        "human_approval_writer_agent",
-    }
+    assert names == {"cloudbridge_architect_agent"}

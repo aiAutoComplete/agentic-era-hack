@@ -15,13 +15,21 @@ install:
 # Launch local dev playground
 playground:
 	@echo "==============================================================================="
-	@echo "| 🚀 Starting your agent playground...                                        |"
+	@echo "| 🚀 Starting CloudBridge agent playground...                                 |"
 	@echo "|                                                                             |"
-	@echo "| 💡 Try asking: What's the weather in San Francisco?                         |"
+	@echo "| 💡 Try asking: Convert input/sample-three-tier.yaml to GCP Terraform.       |"
 	@echo "|                                                                             |"
 	@echo "| 🔍 IMPORTANT: Select the 'app' folder to interact with your agent.          |"
 	@echo "==============================================================================="
-	#uv run adk web . --port 8501 --reload_agents
+	@PROJECT_ID="$${GOOGLE_CLOUD_PROJECT:-$$(gcloud config get-value project 2>/dev/null)}"; \
+	if [ -z "$$PROJECT_ID" ]; then \
+		echo "ERROR: Set GOOGLE_CLOUD_PROJECT or run: gcloud config set project YOUR_PROJECT_ID"; \
+		exit 1; \
+	fi; \
+	echo "Using Vertex AI project $$PROJECT_ID in location global"; \
+	GOOGLE_CLOUD_PROJECT="$$PROJECT_ID" \
+	GOOGLE_CLOUD_LOCATION="global" \
+	GOOGLE_GENAI_USE_VERTEXAI="true" \
 	uv run adk web --allow_origins 'regex:https://.*\.cloudshell\.dev' . --port 8501 --reload_agents
 
 # ==============================================================================

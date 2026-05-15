@@ -81,17 +81,17 @@ output/
 The main implementation is split across:
 
 ```text
-app/agent.py              # ADK 2 graph workflow + specialist agents
-app/cloudbridge_tools.py  # small safe tools used by agents
+app/agent.py              # simple ADK 2 graph workflow + CloudBridge architect agent
+app/cloudbridge_tools.py  # small safe tools used by the agent
 app/parser.py             # CloudFormation parser
 app/terraform_gen.py      # starter Terraform generation
 app/compliance.py         # explainable compliance checks
 ```
 
-CloudBridge now uses ADK 2 graph workflows instead of one deterministic router.
-The workflow root is `cloudbridge_architect` and it routes into specialist
-agents for project browsing, AWS source analysis, conversion planning, Terraform
-generation, compliance review, and human-approved file writes.
+CloudBridge uses ADK 2 graph workflows, but the graph is intentionally simple:
+`cloudbridge_architect` runs one capable `cloudbridge_architect_agent`. The agent
+uses tools for safe file access, CloudFormation parsing, conversion bundle
+creation, compliance review, and human-approved file writes.
 
 ---
 
@@ -103,26 +103,15 @@ User request
     ▼
 cloudbridge_architect  (ADK 2 Workflow graph)
     │
-    ├── browse/help ─────▶ project_browser_agent
+    ▼
+cloudbridge_architect_agent
     │
-    ├── analyze ─────────▶ aws_source_analyst_agent
-    │
-    ├── compliance ──────▶ compliance_reviewer_agent
-    │
-    └── convert/write ───▶ aws_source_analyst_for_conversion
-                             │
-                             ▼
-                           conversion_agent
-                             │
-                             ▼
-                           terraform_generator_agent
-                             │
-                             ▼
-                           compliance_reviewer_for_conversion
-                             │
-                             ▼
-                           human_approval_writer_agent
-                           asks approve / revise / cancel before writes
+    ├── list/read project files
+    ├── parse/explain CloudFormation
+    ├── map AWS resources to Google Cloud
+    ├── generate starter Terraform bundle
+    ├── review compliance/security findings
+    └── ask approve / revise / cancel before writes
 ```
 
 Tooling is intentionally small:
@@ -137,8 +126,8 @@ Tooling is intentionally small:
 One-line demo narrative:
 
 ```text
-Open CloudBridge → ask to convert input/sample-three-tier.yaml → agents analyze,
-map, generate Terraform, review compliance → writer asks for approval → output/ files are written only after approval.
+Open CloudBridge → ask to convert input/sample-three-tier.yaml → the agent analyzes,
+maps, generates Terraform, reviews compliance → asks for approval → output/ files are written only after approval.
 ```
 
 ---
