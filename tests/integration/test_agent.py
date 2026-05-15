@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from google.adk.agents import LlmAgent, SequentialAgent
-from google.adk.tools import get_user_choice
+from google.adk.tools import FunctionTool
 
 from app.agent import (
     app,
@@ -33,7 +33,11 @@ def test_cloudbridge_conversation_agent_imports() -> None:
 
 
 def test_output_writer_keeps_human_approval_tool() -> None:
-    assert get_user_choice in output_writer.tools
+    assert len(output_writer.tools) == 1
+    tool = output_writer.tools[0]
+    assert isinstance(tool, FunctionTool)
+    assert tool.name == "write_outputs_and_generate_diagrams"
+    assert tool._require_confirmation is True
 
 
 def test_conversion_pipeline_agents_are_registered() -> None:

@@ -83,7 +83,7 @@ if approved, files are written under output/
 
 ## Human-in-the-loop writes
 
-CloudBridge does **not** silently overwrite files. The final `output_writer` uses ADK's human choice tool and asks the user to approve or cancel.
+CloudBridge does **not** silently overwrite files. The final `output_writer` uses ADK tool confirmation, so the write tool does not execute until the user approves it.
 
 On approval, it writes:
 
@@ -94,6 +94,12 @@ output/iam.tf
 output/outputs.tf
 output/architecture_summary.md
 output/compliance_report.md
+```
+
+It then runs:
+
+```bash
+uv run --with diagrams python scripts/generate_diagrams.py --all
 ```
 
 ---

@@ -43,7 +43,7 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.apps import App
-from google.adk.tools import get_user_choice
+from google.adk.tools import FunctionTool
 
 from .cloudbridge_tools import (
     convert_cloudformation_to_gcp,
@@ -229,11 +229,16 @@ Keep it concise, but more useful than a one-word PASS.
     output_key="compliance_report",
 )
 
+approved_output_writer_tool = FunctionTool(
+    write_outputs_and_generate_diagrams,
+    require_confirmation=True,
+)
+
 output_writer = LlmAgent(
     name="output_writer",
     model=MODEL,
     description="Asks for human approval, then writes CloudBridge files to output/ and generates diagrams.",
-    tools=[get_user_choice, write_outputs_and_generate_diagrams],
+    tools=[approved_output_writer_tool],
     instruction="""You are the output writer.
 
 Inputs:
@@ -250,10 +255,10 @@ Inputs:
 {compliance_report}
 </compliance_report>
 
-First call get_user_choice with exactly these options: ["approve", "cancel"]. Tell the user approval writes files to output/ and generates diagrams.
-If the human chooses cancel, do not write files. Report that output writing was cancelled.
-If the human chooses approve, call write_outputs_and_generate_diagrams with terraform_bundle, compliance_report, gcp_plan, and approval="approve".
-This must write output/main.tf, output/variables.tf, output/iam.tf, output/outputs.tf, output/architecture_summary.md, and output/compliance_report.md.
+Call write_outputs_and_generate_diagrams with terraform_bundle, compliance_report, and gcp_plan.
+The tool requires ADK human confirmation before it executes, so the user can approve or reject the write.
+If the human rejects the confirmed tool call, do not retry automatically; report that output writing was cancelled.
+After approval, this must write output/main.tf, output/variables.tf, output/iam.tf, output/outputs.tf, output/architecture_summary.md, and output/compliance_report.md.
 After approved writing, the tool also runs `uv run --with diagrams python scripts/generate_diagrams.py --all` and generates diagrams under output/diagrams/.
 Report the written output files and a short count of generated diagram files.
 """.strip(),
