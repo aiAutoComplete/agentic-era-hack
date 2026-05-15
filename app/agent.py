@@ -27,12 +27,14 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncGenerator, Literal
 
 import google.auth
 from dotenv import load_dotenv
-from google.adk.agents import Agent
+from google.adk.agents import Agent, BaseAgent
+from google.adk.agents.invocation_context import InvocationContext
 from google.adk.apps import App
+from google.adk.events import Event
 from google.adk.models import Gemini
 from google.auth.exceptions import DefaultCredentialsError
 from google.genai import types
@@ -762,6 +764,88 @@ def convert_input_file_to_gcp(filename: str = "sample-three-tier.yaml", write_fi
     return convert_cloudformation_to_gcp(template, write_files=write_files)
 
 
+def _content_text(content: types.Content | None) -> str:
+    if not content or not content.parts:
+        return ""
+    return "\n".join(part.text or "" for part in content.parts if getattr(part, "text", None))
+
+
+def _extract_template_text(message: str) -> str:
+    fenced = re.search(r"```(?:yaml|yml|json|cloudformation)?\s*(.*?)```", message, re.DOTALL | re.IGNORECASE)
+    return fenced.group(1).strip() if fenced else message.strip()
+
+
+def _wants_file_write(message: str) -> bool:
+    lowered = message.lower()
+    return any(word in lowered for word in ["write", "save", "output/", "output dir", "local file"])
+
+
+def _format_final_package(final: dict[str, Any]) -> str:
+    files = final.get("files", {})
+    compliance = final.get("compliance", {})
+    parsed = final.get("parsed") or {}
+    resources = parsed.get("resources", [])
+    unsupported = parsed.get("unsupported", [])
+    output_dir = final.get("output_dir")
+
+    lines = [
+        "# CloudBridge conversion complete",
+        "",
+        f"Compliance status: **{compliance.get('status', 'UNKNOWN')}**",
+        "",
+        f"Supported resources parsed: **{len(resources)}**",
+        f"Unsupported resources: **{len(unsupported)}**",
+    ]
+    if output_dir:
+        lines.append(f"Files were written under `{output_dir}/`.")
+    lines.extend(["", "## Generated files", ""])
+    for name, content in files.items():
+        fence = "hcl" if name.endswith(".tf") else "markdown"
+        lines.extend([f"### `{name}`", "", f"```{fence}", str(content).rstrip(), "```", ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+class CloudBridgeAgent(BaseAgent):
+    """Deterministic ADK agent for the playground.
+
+    This avoids any Gemini API-key/Vertex backend ambiguity in `make playground`.
+    The conversion is intentionally deterministic for the hackathon demo; the
+    LLM specialist agents below remain available for future Agent Engine work,
+    but the playground root path does not require a model call.
+    """
+
+    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
+        message = _content_text(ctx.user_content)
+        lowered = message.lower()
+
+        try:
+            if "sample-three-tier" in lowered or "sample three tier" in lowered:
+                final = convert_input_file_to_gcp("sample-three-tier.yaml", write_files=True)
+                response = _format_final_package(final)
+            elif "resources:" in lowered or "awstemplateformatversion" in lowered:
+                template = _extract_template_text(message)
+                final = convert_cloudformation_to_gcp(template, write_files=_wants_file_write(message))
+                response = _format_final_package(final)
+            else:
+                response = (
+                    "CloudBridge is ready. Paste a CloudFormation YAML/JSON template, "
+                    "or ask: `convert input/sample-three-tier.yaml`. I will return "
+                    "main.tf, variables.tf, iam.tf, outputs.tf, architecture_summary.md, "
+                    "and compliance_report.md."
+                )
+        except Exception as exc:
+            response = f"CloudBridge could not complete the conversion: {exc}"
+
+        yield Event(
+            author=self.name,
+            invocation_id=ctx.invocation_id,
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response)],
+            ),
+        )
+
+
 translation_agent = Agent(
     name="translation_agent",
     model=_gemini_model(),
@@ -805,43 +889,9 @@ Return the corrected TerraformBundle JSON only.
 """.strip(),
 )
 
-root_agent = Agent(
+root_agent = CloudBridgeAgent(
     name="cloudbridge",
-    model=_gemini_model(),
-    description="AWS CloudFormation to GCP Terraform and compliance report agent.",
-    sub_agents=[translation_agent, terraform_agent, fix_agent],
-    tools=[
-        read_input_template,
-        parse_cloudformation_tool,
-        service_mapping_catalog,
-        translate_resources_tool,
-        generate_terraform_tool,
-        compliance_check_tool,
-        convert_cloudformation_to_gcp,
-        convert_input_file_to_gcp,
-        write_output_files,
-    ],
-    instruction="""
-You are CloudBridge, a Google ADK hackathon agent that converts small AWS
-CloudFormation templates into a first-pass Google Cloud Terraform bundle and a
-plain-English compliance report.
-
-Primary workflow from README.md:
-1. Accept pasted CloudFormation YAML/JSON, or read a named file from input/.
-2. Parse resources and clearly list unsupported resources as warnings.
-3. Map supported AWS resources to GCP equivalents using the MVP catalog.
-4. Generate starter Terraform files: main.tf, variables.tf, iam.tf, outputs.tf.
-5. Generate architecture_summary.md and compliance_report.md.
-6. Run the compliance gate for public databases, broad IAM, and storage/database
-   protection. If findings appear, use fix_agent or explain required changes.
-
-For fastest demos, call convert_cloudformation_to_gcp for pasted templates or
-convert_input_file_to_gcp for files such as input/sample-three-tier.yaml. Return
-the generated files in the response. If the user asks to save files locally, set
-write_files=true so files are written under output/.
-
-Stay inside the MVP scope and do not claim this is production-ready Terraform.
-""".strip(),
+    description="Deterministic AWS CloudFormation to GCP Terraform and compliance report agent.",
 )
 
 app = App(
