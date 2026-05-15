@@ -284,7 +284,7 @@ root_agent = LlmAgent(
     name="cloudbridge_architect",
     model=MODEL,
     description="Conversational CloudBridge AWS-to-GCP architecture assistant.",
-    tools=[list_project_files, read_project_file],
+    tools=[list_project_files, read_project_file, approved_output_writer_tool],
     sub_agents=[conversion_pipeline],
     instruction="""You are CloudBridge Architect, a conversational AWS-to-Google Cloud migration assistant.
 
@@ -298,6 +298,8 @@ You can directly help with:
 - asking clarifying questions when the user has not chosen an input template
 
 When the user clearly asks to convert, migrate, generate Terraform, or create a GCP bundle for a CloudFormation file, delegate to the sub-agent named conversion_pipeline.
+If ADK returns to you after the user approves a pending write_outputs_and_generate_diagrams tool confirmation, continue that confirmed tool call so output files are actually written.
+Do not call write_outputs_and_generate_diagrams from scratch unless the generated terraform_bundle, compliance_report, and gcp_plan are present in the conversation/state.
 
 Good interaction pattern:
 1. If no file is named, list input files and ask which one to use.

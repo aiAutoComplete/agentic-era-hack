@@ -38,6 +38,7 @@ def test_output_writer_keeps_human_approval_tool() -> None:
     assert isinstance(tool, FunctionTool)
     assert tool.name == "write_outputs_and_generate_diagrams"
     assert tool._require_confirmation is True
+    assert tool in root_agent.tools
 
 
 def test_conversion_pipeline_agents_are_registered() -> None:
