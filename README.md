@@ -62,19 +62,26 @@ output/
 ```text
 .
 ├── README.md
-├── PROBLEM_STATEMENT.md
-├── AGENT_FLOW.md
-└── cloudbridge_agent/
+├── input/
+│   └── sample-three-tier.yaml
+├── output/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── iam.tf
+│   ├── outputs.tf
+│   ├── architecture_summary.md
+│   └── compliance_report.md
+└── app/
     ├── __init__.py
     ├── agent.py
-    ├── requirements.txt
-    └── .env.example
+    ├── agent_engine_app.py
+    └── app_utils/
 ```
 
 The main implementation is in:
 
 ```text
-cloudbridge_agent/agent.py
+app/agent.py
 ```
 
 That file contains:
@@ -86,8 +93,9 @@ That file contains:
 - Terraform generation agent
 - fix agent
 - deterministic compliance checker
-- ADK 2 graph-workflow path when available
-- ADK 1.x fallback coordinator for the current lab/local package
+- Google ADK `root_agent`
+- Agent Starter Pack `app = App(...)` wrapper for Agent Engine deployment
+- local `input/` and `output/` helpers for hackathon demos
 
 ---
 
@@ -238,22 +246,25 @@ Findings:
 From the repo root:
 
 ```bash
-cd /Users/bhatiar3/ai_projects/google
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r cloudbridge_agent/requirements.txt
+cd /Users/bhatiar3/ai_projects/agentic-era-hack
+uv sync
 ```
 
-Copy the env example and fill in your lab values if needed:
+Run a local deterministic smoke conversion using the sample input template:
 
 ```bash
-cp cloudbridge_agent/.env.example cloudbridge_agent/.env
+uv run python - <<'PY'
+from app.agent import convert_input_file_to_gcp
+result = convert_input_file_to_gcp("sample-three-tier.yaml", write_files=True)
+print(result["compliance"]["status"])
+print(sorted(result["files"]))
+PY
 ```
 
-Run the ADK web UI from the parent directory that contains `cloudbridge_agent`:
+Run the ADK web UI from the repository root:
 
 ```bash
-adk web --port 8000
+uv run adk web --port 8000
 ```
 
 Then open:
@@ -262,7 +273,7 @@ Then open:
 http://localhost:8000
 ```
 
-Select the `cloudbridge_agent` agent and paste a small CloudFormation template.
+Select the `app` / `cloudbridge` agent and paste a small CloudFormation template, or ask it to convert `input/sample-three-tier.yaml`.
 
 ---
 
@@ -280,14 +291,14 @@ adk deploy cloud_run \
   --region="$GOOGLE_CLOUD_LOCATION" \
   --service_name="cloudbridge" \
   --with_ui \
-  ./cloudbridge_agent
+  ./app
 ```
 
 Notes:
 
-- `cloudbridge_agent/agent.py` defines `root_agent`, which ADK expects.
-- `cloudbridge_agent/__init__.py` imports the agent module.
-- `cloudbridge_agent/requirements.txt` contains runtime dependencies.
+- `app/agent.py` defines `root_agent`, which ADK expects.
+- `app/agent.py` also exports `app = App(...)` for Agent Engine.
+- `pyproject.toml` contains runtime dependencies.
 
 ---
 
