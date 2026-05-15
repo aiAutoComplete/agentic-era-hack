@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from app.agent import convert_cloudformation_to_gcp, read_input_template
-from app.cloudbridge_tools import read_project_file, run_compliance_review
+from app.cloudbridge_tools import (
+    read_project_file,
+    run_compliance_review,
+    write_generated_output_files,
+)
 from app.compliance import compliance_check
 from app.parser import parse_cfn
 
@@ -63,3 +67,39 @@ def test_insecure_template_compliance_findings() -> None:
     assert "AWS_SG_OPEN_TO_INTERNET" in rule_ids
     assert "AWS_RDS_PUBLIC" in rule_ids
     assert "AWS_IAM_WILDCARD_ADMIN" in rule_ids
+
+
+def test_write_generated_output_files_requires_approval(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.cloudbridge_tools.OUTPUT_DIR", tmp_path)
+    terraform_bundle = """```main.tf
+resource "google_compute_network" "main" {}
+```
+```variables.tf
+variable "project_id" { type = string }
+```
+```iam.tf
+# iam
+```
+```outputs.tf
+output "network" { value = "main" }
+```"""
+
+    not_written = write_generated_output_files(
+        terraform_bundle=terraform_bundle,
+        compliance_report="# Compliance\n",
+        gcp_plan="# Plan\n",
+        approval="cancel",
+    )
+    assert not_written["status"] == "not_written"
+    assert not (tmp_path / "main.tf").exists()
+
+    written = write_generated_output_files(
+        terraform_bundle=terraform_bundle,
+        compliance_report="# Compliance\n",
+        gcp_plan="# Plan\n",
+        approval="approve",
+    )
+    assert written["status"] == "written"
+    assert (tmp_path / "main.tf").exists()
+    assert (tmp_path / "compliance_report.md").exists()
+    assert (tmp_path / "architecture_summary.md").exists()

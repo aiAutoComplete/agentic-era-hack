@@ -43,12 +43,14 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.apps import App
+from google.adk.tools import get_user_choice
 
 from .cloudbridge_tools import (
     convert_cloudformation_to_gcp,
     list_project_files,
     read_input_template,
     read_project_file,
+    write_generated_output_files,
 )
 
 MODEL_NAME = os.getenv("CLOUDBRIDGE_MODEL", "gemini-3-flash-preview")
@@ -227,13 +229,56 @@ Keep it concise, but more useful than a one-word PASS.
     output_key="compliance_report",
 )
 
+output_writer = LlmAgent(
+    name="output_writer",
+    model=MODEL,
+    description="Asks for human approval and writes generated CloudBridge files to output/.",
+    tools=[get_user_choice, write_generated_output_files],
+    instruction="""You are the human-in-the-loop output writer.
+
+Inputs:
+
+<gcp_plan>
+{gcp_plan}
+</gcp_plan>
+
+<terraform_bundle>
+{terraform_bundle}
+</terraform_bundle>
+
+<compliance_report>
+{compliance_report}
+</compliance_report>
+
+Before writing files, summarize exactly what will be written:
+- output/main.tf
+- output/variables.tf
+- output/iam.tf
+- output/outputs.tf
+- output/architecture_summary.md
+- output/compliance_report.md
+
+Ask the user to choose approve or cancel using get_user_choice with options ["approve", "cancel"].
+Only if the user chooses approve, call write_generated_output_files with terraform_bundle, compliance_report, gcp_plan, and approval="approve".
+If the user cancels or does not approve, do not write files.
+After the tool call, report the written file paths or the not-written reason.
+""".strip(),
+    output_key="write_result",
+)
+
 conversion_pipeline = SequentialAgent(
     name="conversion_pipeline",
     description=(
         "Runs the full CloudBridge conversion: load CloudFormation, map to "
         "Google Cloud, generate Terraform, and review compliance."
     ),
-    sub_agents=[source_loader, translator, terraform_writer, compliance_reviewer],
+    sub_agents=[
+        source_loader,
+        translator,
+        terraform_writer,
+        compliance_reviewer,
+        output_writer,
+    ],
 )
 
 root_agent = LlmAgent(
@@ -275,6 +320,7 @@ specialist_agents = [
     translator,
     terraform_writer,
     compliance_reviewer,
+    output_writer,
 ]
 
 __all__ = [
@@ -283,6 +329,7 @@ __all__ = [
     "compliance_reviewer",
     "conversion_pipeline",
     "convert_cloudformation_to_gcp",
+    "output_writer",
     "read_input_template",
     "root_agent",
     "source_loader",

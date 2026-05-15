@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -296,8 +297,51 @@ def write_project_files_after_approval(
             raise ValueError("Output file names must not include directories.")
         path = OUTPUT_DIR / safe_name
         path.write_text(content)
-        written[safe_name] = str(path.relative_to(REPO_ROOT))
+        try:
+            written[safe_name] = str(path.relative_to(REPO_ROOT))
+        except ValueError:
+            written[safe_name] = str(path)
     return {"status": "written", "files": written}
+
+
+def _extract_fenced_files(text: str) -> dict[str, str]:
+    files: dict[str, str] = {}
+    for match in re.finditer(r"```([^`\n]+)\n(.*?)\n```", text, flags=re.DOTALL):
+        label = match.group(1).strip().split()[0]
+        if label in {"main.tf", "variables.tf", "iam.tf", "outputs.tf"}:
+            files[label] = match.group(2).strip() + "\n"
+    return files
+
+
+def write_generated_output_files(
+    terraform_bundle: str,
+    compliance_report: str,
+    approval: str,
+    gcp_plan: str = "",
+) -> dict[str, Any]:
+    """Write generated Terraform/report files to output/ after human approval.
+
+    Args:
+        terraform_bundle: Text containing fenced Terraform blocks tagged as
+            main.tf, variables.tf, iam.tf, and outputs.tf.
+        compliance_report: Final compliance report text to write as markdown.
+        approval: Human approval. Must be approve/approved/yes approve.
+        gcp_plan: Optional architecture mapping markdown for architecture_summary.md.
+    """
+    files = _extract_fenced_files(terraform_bundle)
+    missing = [
+        name
+        for name in ("main.tf", "variables.tf", "iam.tf", "outputs.tf")
+        if name not in files
+    ]
+    if missing:
+        return {"status": "not_written", "reason": f"Missing fenced files: {missing}"}
+
+    files["compliance_report.md"] = compliance_report.strip() + "\n"
+    if gcp_plan.strip():
+        files["architecture_summary.md"] = gcp_plan.strip() + "\n"
+
+    return write_project_files_after_approval(files, approval)
 
 
 # Backward-compatible helpers used by existing tests/imports.

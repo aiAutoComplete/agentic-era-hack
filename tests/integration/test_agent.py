@@ -32,6 +32,7 @@ def test_conversion_pipeline_agents_are_registered() -> None:
         "translator",
         "terraform_writer",
         "compliance_reviewer",
+        "output_writer",
     ]
     names = {agent.name for agent in specialist_agents}
     assert {
@@ -41,4 +42,5 @@ def test_conversion_pipeline_agents_are_registered() -> None:
         "translator",
         "terraform_writer",
         "compliance_reviewer",
+        "output_writer",
     }.issubset(names)
