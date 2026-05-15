@@ -13,8 +13,15 @@
 # limitations under the License.
 
 from google.adk.agents import LlmAgent, SequentialAgent
+from google.adk.tools import get_user_choice
 
-from app.agent import app, conversion_pipeline, root_agent, specialist_agents
+from app.agent import (
+    app,
+    conversion_pipeline,
+    output_writer,
+    root_agent,
+    specialist_agents,
+)
 
 
 def test_cloudbridge_conversation_agent_imports() -> None:
@@ -23,6 +30,10 @@ def test_cloudbridge_conversation_agent_imports() -> None:
     assert isinstance(root_agent, LlmAgent)
     assert root_agent.name == "cloudbridge_architect"
     assert [agent.name for agent in root_agent.sub_agents] == ["conversion_pipeline"]
+
+
+def test_output_writer_keeps_human_approval_tool() -> None:
+    assert get_user_choice in output_writer.tools
 
 
 def test_conversion_pipeline_agents_are_registered() -> None:

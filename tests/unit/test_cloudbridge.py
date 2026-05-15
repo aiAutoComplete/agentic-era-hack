@@ -4,6 +4,7 @@ import pytest
 
 from app.agent import convert_cloudformation_to_gcp, read_input_template
 from app.cloudbridge_tools import (
+    generate_architecture_diagrams,
     read_project_file,
     run_compliance_review,
     write_generated_output_files,
@@ -67,6 +68,38 @@ def test_insecure_template_compliance_findings() -> None:
     assert "AWS_SG_OPEN_TO_INTERNET" in rule_ids
     assert "AWS_RDS_PUBLIC" in rule_ids
     assert "AWS_IAM_WILDCARD_ADMIN" in rule_ids
+
+
+def test_generate_architecture_diagrams_runs_requested_uv_command(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+
+        class Result:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("app.cloudbridge_tools.OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr("app.cloudbridge_tools.subprocess.run", fake_run)
+
+    result = generate_architecture_diagrams()
+
+    assert result["status"] == "generated"
+    assert calls[0][0] == [
+        "uv",
+        "run",
+        "--with",
+        "diagrams",
+        "python",
+        "scripts/generate_diagrams.py",
+        "--all",
+    ]
 
 
 def test_write_generated_output_files_requires_approval(tmp_path, monkeypatch) -> None:

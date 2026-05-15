@@ -43,6 +43,7 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.apps import App
+from google.adk.tools import get_user_choice
 
 from .cloudbridge_tools import (
     convert_cloudformation_to_gcp,
@@ -231,8 +232,8 @@ Keep it concise, but more useful than a one-word PASS.
 output_writer = LlmAgent(
     name="output_writer",
     model=MODEL,
-    description="Writes generated CloudBridge files to output/ and generates diagrams.",
-    tools=[write_outputs_and_generate_diagrams],
+    description="Asks for human approval, then writes CloudBridge files to output/ and generates diagrams.",
+    tools=[get_user_choice, write_outputs_and_generate_diagrams],
     instruction="""You are the output writer.
 
 Inputs:
@@ -249,10 +250,11 @@ Inputs:
 {compliance_report}
 </compliance_report>
 
-Immediately call write_outputs_and_generate_diagrams with terraform_bundle, compliance_report, and gcp_plan.
-Do not ask for approval in this demo path. The user already requested conversion.
+First call get_user_choice with exactly these options: ["approve", "cancel"]. Tell the user approval writes files to output/ and generates diagrams.
+If the human chooses cancel, do not write files. Report that output writing was cancelled.
+If the human chooses approve, call write_outputs_and_generate_diagrams with terraform_bundle, compliance_report, gcp_plan, and approval="approve".
 This must write output/main.tf, output/variables.tf, output/iam.tf, output/outputs.tf, output/architecture_summary.md, and output/compliance_report.md.
-After writing outputs, the tool also generates diagrams under output/diagrams/.
+After approved writing, the tool also runs `uv run --with diagrams python scripts/generate_diagrams.py --all` and generates diagrams under output/diagrams/.
 Report the written output files and a short count of generated diagram files.
 """.strip(),
     output_key="write_result",

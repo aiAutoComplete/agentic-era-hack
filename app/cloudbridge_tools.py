@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -362,8 +361,8 @@ def generate_architecture_diagrams() -> dict[str, Any]:
                 "run",
                 "--with",
                 "diagrams",
-                sys.executable,
-                str(script),
+                "python",
+                str(script.relative_to(REPO_ROOT)),
                 "--all",
             ],
             cwd=REPO_ROOT,
@@ -390,14 +389,15 @@ def generate_architecture_diagrams() -> dict[str, Any]:
 def write_outputs_and_generate_diagrams(
     terraform_bundle: str,
     compliance_report: str,
+    approval: str,
     gcp_plan: str = "",
 ) -> dict[str, Any]:
-    """Write generated outputs immediately, then generate architecture diagrams."""
+    """Write generated outputs after human approval, then generate diagrams."""
     write_result = write_generated_output_files(
         terraform_bundle=terraform_bundle,
         compliance_report=compliance_report,
         gcp_plan=gcp_plan,
-        approval="approve",
+        approval=approval,
     )
     if write_result.get("status") != "written":
         return {"write": write_result, "diagrams": {"status": "skipped"}}
