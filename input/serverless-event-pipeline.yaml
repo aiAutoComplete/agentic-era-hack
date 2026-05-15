@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Event-driven serverless ingestion pipeline using S3, SQS, Lambda, and DynamoDB.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: event-pipeline-demo
+
+Resources:
+  InboundEventsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt EventQueue.Arn
+      VersioningConfiguration:
+        Status: Enabled
+
+  EventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${EnvironmentName}-events
+      VisibilityTimeout: 90
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  EventDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${EnvironmentName}-events-dlq
+      MessageRetentionPeriod: 1209600
+
+  EventQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref EventQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt EventQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub arn:aws:s3:::${InboundEventsBucket}
+
+  EventProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EventProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt EventQueue.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt EventMetadataTable.Arn
+
+  EventProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-processor
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt EventProcessorRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref EventMetadataTable
+      Code:
+        ZipFile: |
+          import os
+          import time
+
+          def handler(event, context):
+              # Demo handler: real implementation would persist event metadata.
+              return {"processed": len(event.get("Records", [])), "timestamp": int(time.time())}
+
+  EventProcessorMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt EventQueue.Arn
+      FunctionName: !Ref EventProcessorFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 15
+
+  EventMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: object_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: object_key
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+Outputs:
+  InboundBucketName:
+    Description: S3 bucket where incoming event files are uploaded.
+    Value: !Ref InboundEventsBucket
+  QueueUrl:
+    Description: SQS queue URL for pending events.
+    Value: !Ref EventQueue
+  TableName:
+    Description: DynamoDB table for event metadata.
+    Value: !Ref EventMetadataTable

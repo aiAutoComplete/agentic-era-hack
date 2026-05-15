@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Serverless reverse proxy using API Gateway HTTP API and Lambda.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: lambda-proxy-demo
+  UpstreamBaseUrl:
+    Type: String
+    Default: https://example.internal.service
+    Description: Upstream service base URL that the Lambda proxy forwards to.
+
+Resources:
+  ProxyExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ProxyLoggingPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  ReverseProxyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-reverse-proxy
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ProxyExecutionRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          UPSTREAM_BASE_URL: !Ref UpstreamBaseUrl
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import urllib.request
+
+          def handler(event, context):
+              path = event.get("rawPath", "/")
+              query = event.get("rawQueryString", "")
+              upstream = os.environ["UPSTREAM_BASE_URL"].rstrip("/") + path
+              if query:
+                  upstream = upstream + "?" + query
+              req = urllib.request.Request(upstream, method=event.get("requestContext", {}).get("http", {}).get("method", "GET"))
+              with urllib.request.urlopen(req, timeout=8) as response:
+                  body = response.read().decode("utf-8")
+                  return {
+                      "statusCode": response.status,
+                      "headers": {"content-type": response.headers.get("content-type", "application/json")},
+                      "body": body,
+                  }
+
+  ProxyHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${EnvironmentName}-http-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowOrigins:
+          - https://example.com
+        AllowHeaders:
+          - authorization
+          - content-type
+
+  ProxyIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ProxyHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ReverseProxyFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  ProxyRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ProxyHttpApi
+      RouteKey: ANY /{proxy+}
+      Target: !Sub integrations/${ProxyIntegration}
+
+  ProxyStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ProxyHttpApi
+      StageName: prod
+      AutoDeploy: true
+
+  AllowApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ReverseProxyFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ProxyHttpApi}/*/*/*
+
+Outputs:
+  ApiEndpoint:
+    Description: Public HTTPS endpoint for the Lambda reverse proxy.
+    Value: !Sub https://${ProxyHttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/
