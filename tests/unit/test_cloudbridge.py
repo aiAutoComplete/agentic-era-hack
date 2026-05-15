@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from app.agent import convert_cloudformation_to_gcp, parse_cfn, read_input_template
+from app.agent import (
+    _cloudbridge_response,
+    convert_cloudformation_to_gcp,
+    parse_cfn,
+    read_input_template,
+)
 
 
 def test_parse_sample_three_tier_template() -> None:
@@ -31,3 +36,25 @@ def test_convert_sample_template_returns_expected_files() -> None:
     assert "google_compute_network" in result["files"]["main.tf"]
     assert "google_sql_database_instance" in result["files"]["main.tf"]
     assert "Status: PASS" in result["files"]["compliance_report.md"]
+
+
+def test_chat_help_is_architecture_focused_not_repetitive() -> None:
+    response = _cloudbridge_response("hello")
+
+    assert "CloudBridge" in response
+    assert "show files" in response
+    assert "list output files" in response
+    assert "AWS-to-GCP architecture" in response or "AWS-to-GCP" in response
+
+
+def test_chat_can_show_output_file() -> None:
+    response = _cloudbridge_response("show output/main.tf")
+
+    assert "Here is `output/main.tf`" in response
+    assert "google_compute_network" in response
+
+
+def test_chat_declines_unrelated_topics() -> None:
+    response = _cloudbridge_response("write me a poem about pizza")
+
+    assert "I can only help with this CloudBridge architecture project" in response

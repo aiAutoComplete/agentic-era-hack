@@ -780,6 +780,215 @@ def _wants_file_write(message: str) -> bool:
     return any(word in lowered for word in ["write", "save", "output/", "output dir", "local file"])
 
 
+def _safe_project_path(path_text: str) -> Path:
+    requested = path_text.strip().strip("`'\"")
+    requested = requested.removeprefix("./")
+    path = (REPO_ROOT / requested).resolve()
+    repo = REPO_ROOT.resolve()
+    if repo not in [path, *path.parents]:
+        raise ValueError("Path must stay inside this CloudBridge project.")
+    if path.is_dir():
+        raise ValueError("Please ask for a specific file, not a directory.")
+    return path
+
+
+def _project_file_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for directory in [INPUT_DIR, OUTPUT_DIR]:
+        if directory.exists():
+            candidates.extend(sorted(path for path in directory.iterdir() if path.is_file()))
+    candidates.extend([REPO_ROOT / "README.md", REPO_ROOT / "app" / "agent.py"])
+    return candidates
+
+
+def _find_referenced_file(message: str) -> Path | None:
+    lowered = message.lower()
+    explicit = re.search(r"((?:input|output)/[A-Za-z0-9_.-]+)", message)
+    if explicit:
+        return _safe_project_path(explicit.group(1))
+
+    for path in _project_file_candidates():
+        if path.name.lower() in lowered:
+            return path
+
+    aliases = {
+        "main terraform": OUTPUT_DIR / "main.tf",
+        "terraform main": OUTPUT_DIR / "main.tf",
+        "variables": OUTPUT_DIR / "variables.tf",
+        "iam": OUTPUT_DIR / "iam.tf",
+        "outputs": OUTPUT_DIR / "outputs.tf",
+        "architecture summary": OUTPUT_DIR / "architecture_summary.md",
+        "ascii": OUTPUT_DIR / "aws-to-gcp-ascii-flow.md",
+        "flow": OUTPUT_DIR / "aws-to-gcp-ascii-flow.md",
+        "compliance": OUTPUT_DIR / "compliance_report.md",
+    }
+    for phrase, path in aliases.items():
+        if phrase in lowered:
+            return path
+    return None
+
+
+def _list_files(directory: Path, label: str) -> str:
+    if not directory.exists():
+        return f"No `{label}/` directory exists yet."
+    files = sorted(path.name for path in directory.iterdir() if path.is_file())
+    if not files:
+        return f"`{label}/` is empty."
+    return f"Files in `{label}/`:\n" + "\n".join(f"- `{label}/{name}`" for name in files)
+
+
+def _read_project_file(path: Path) -> str:
+    if not path.exists():
+        return f"I could not find `{path.relative_to(REPO_ROOT)}`."
+    text = path.read_text()
+    fence = "hcl" if path.suffix == ".tf" else "yaml" if path.suffix in {".yaml", ".yml"} else "markdown"
+    return f"Here is `{path.relative_to(REPO_ROOT)}`:\n\n```{fence}\n{text.rstrip()}\n```"
+
+
+def _summarize_current_architecture() -> str:
+    template = read_input_template("sample-three-tier.yaml")
+    parsed = parse_cfn(template)
+    translation = translate_resources(parsed)
+    rows = [
+        "# CloudBridge architecture view",
+        "",
+        "This project demonstrates AWS CloudFormation to GCP Terraform conversion for a three-tier app.",
+        "",
+        "| AWS logical id | AWS type | GCP target |",
+        "| --- | --- | --- |",
+    ]
+    for item in translation.mappings:
+        rows.append(f"| `{item.aws_logical_id}` | `{item.aws_type}` | `{item.gcp_resource_type}` |")
+    rows.extend(
+        [
+            "",
+            "Key generated outputs live in `output/`: Terraform files, architecture summary, compliance report, and AWS-to-GCP ASCII flow.",
+        ]
+    )
+    return "\n".join(rows)
+
+
+def _explain_insecure_sample() -> str:
+    return _read_project_file(OUTPUT_DIR / "insecure-sample-expected-compliance-report.md")
+
+
+def _help_response() -> str:
+    return """Hi — I am CloudBridge, focused only on this AWS-to-GCP architecture project.
+
+You can ask me to:
+- show files: `show input/sample-three-tier.yaml`, `show output/main.tf`, `show the ASCII flow`
+- list project artifacts: `list input files`, `list output files`
+- convert templates: `convert input/sample-three-tier.yaml`, `convert input/sample-three-tier-insecure.yaml`
+- explain architecture: `summarize the AWS to GCP mapping`, `what is in the GCP output?`
+- review compliance: `show compliance report`, `what problems are in the insecure sample?`
+
+I will stay on CloudBridge architecture, CloudFormation, Terraform, GCP mapping, and compliance topics."""
+
+
+def _is_architecture_topic(message: str) -> bool:
+    lowered = message.lower()
+    keywords = [
+        "aws",
+        "gcp",
+        "google cloud",
+        "cloudformation",
+        "terraform",
+        "architecture",
+        "input",
+        "output",
+        "s3",
+        "bucket",
+        "security group",
+        "nacl",
+        "iam",
+        "rds",
+        "cloud sql",
+        "vpc",
+        "subnet",
+        "compliance",
+        "mapping",
+        "flow",
+        "diagram",
+        "main.tf",
+        "variables.tf",
+        "outputs.tf",
+        "iam.tf",
+        "sample",
+        "insecure",
+        "convert",
+        "show",
+        "list",
+        "file",
+        "change",
+        "modify",
+        "update",
+    ]
+    greetings = {"hi", "hello", "hey", "help", "start"}
+    return lowered.strip() in greetings or any(keyword in lowered for keyword in keywords)
+
+
+def _cloudbridge_response(message: str) -> str:
+    lowered = message.lower().strip()
+
+    if not lowered or lowered in {"hi", "hello", "hey", "help", "start"}:
+        return _help_response()
+
+    if not _is_architecture_topic(message):
+        return (
+            "I can only help with this CloudBridge architecture project: AWS CloudFormation inputs, "
+            "GCP Terraform outputs, AWS-to-GCP mapping, and compliance. Ask me to list input/output files, "
+            "show a file, convert a template, or explain the architecture."
+        )
+
+    if "list" in lowered and "input" in lowered:
+        return _list_files(INPUT_DIR, "input")
+    if "list" in lowered and "output" in lowered:
+        return _list_files(OUTPUT_DIR, "output")
+
+    if any(word in lowered for word in ["show", "display", "open", "read", "view", "what is in"]):
+        path = _find_referenced_file(message)
+        if path:
+            return _read_project_file(path)
+        if "input" in lowered:
+            return _list_files(INPUT_DIR, "input")
+        if "output" in lowered:
+            return _list_files(OUTPUT_DIR, "output")
+
+    if "problem" in lowered or "finding" in lowered or ("insecure" in lowered and "convert" not in lowered):
+        return _explain_insecure_sample()
+
+    if "sample-three-tier-insecure" in lowered or "insecure sample" in lowered and "convert" in lowered:
+        final = convert_input_file_to_gcp("sample-three-tier-insecure.yaml", write_files=True)
+        return _format_final_package(final)
+
+    if "sample-three-tier" in lowered or "sample three tier" in lowered:
+        final = convert_input_file_to_gcp("sample-three-tier.yaml", write_files=True)
+        return _format_final_package(final)
+
+    if "resources:" in lowered or "awstemplateformatversion" in lowered:
+        template = _extract_template_text(message)
+        final = convert_cloudformation_to_gcp(template, write_files=_wants_file_write(message))
+        return _format_final_package(final)
+
+    if any(word in lowered for word in ["architecture", "mapping", "compare", "aws to gcp", "gcp output", "diagram", "flow"]):
+        if "ascii" in lowered or "diagram" in lowered or "flow" in lowered:
+            return _read_project_file(OUTPUT_DIR / "aws-to-gcp-ascii-flow.md")
+        return _summarize_current_architecture()
+
+    if "compliance" in lowered:
+        return _read_project_file(OUTPUT_DIR / "compliance_report.md")
+
+    if any(word in lowered for word in ["change", "modify", "update"]):
+        return (
+            "I can help make architecture-scoped changes safely. Tell me the target file and the desired "
+            "AWS/GCP architecture change, for example: `update the input template to add a private app subnet` "
+            "or `regenerate output from input/sample-three-tier-insecure.yaml`. For now, I can show files, "
+            "convert templates, regenerate outputs, and explain the changes to make."
+        )
+
+    return _help_response()
+
+
 def _format_final_package(final: dict[str, Any]) -> str:
     files = final.get("files", {})
     compliance = final.get("compliance", {})
@@ -816,25 +1025,11 @@ class CloudBridgeAgent(BaseAgent):
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         message = _content_text(ctx.user_content)
-        lowered = message.lower()
 
         try:
-            if "sample-three-tier" in lowered or "sample three tier" in lowered:
-                final = convert_input_file_to_gcp("sample-three-tier.yaml", write_files=True)
-                response = _format_final_package(final)
-            elif "resources:" in lowered or "awstemplateformatversion" in lowered:
-                template = _extract_template_text(message)
-                final = convert_cloudformation_to_gcp(template, write_files=_wants_file_write(message))
-                response = _format_final_package(final)
-            else:
-                response = (
-                    "CloudBridge is ready. Paste a CloudFormation YAML/JSON template, "
-                    "or ask: `convert input/sample-three-tier.yaml`. I will return "
-                    "main.tf, variables.tf, iam.tf, outputs.tf, architecture_summary.md, "
-                    "and compliance_report.md."
-                )
+            response = _cloudbridge_response(message)
         except Exception as exc:
-            response = f"CloudBridge could not complete the conversion: {exc}"
+            response = f"CloudBridge could not complete that architecture request: {exc}"
 
         yield Event(
             author=self.name,
