@@ -1,147 +1,53 @@
 # CloudBridge
 
-**AWS CloudFormation → GCP Terraform + Compliance Report**  
-**Google ADK hackathon MVP | Deployable to GCP Cloud Run**
+**AWS CloudFormation → Google Cloud architecture, Terraform, compliance review, and diagrams**  
+**Google ADK hackathon MVP**
 
-CloudBridge is a one-day hackathon demo showing how Google ADK agents can turn a small AWS CloudFormation template into a first-pass Google Cloud Terraform bundle with a simple compliance report.
-
-It is intentionally small, understandable, and demo-friendly.
+CloudBridge is a focused Google ADK demo for helping a human understand and migrate AWS CloudFormation architectures to Google Cloud. It is intentionally small, conversational, and demo-friendly: the agent can talk first, inspect files, ask which template to use, run a conversion pipeline on demand, review security posture, and write output files only after human approval.
 
 ---
 
-## What this project does
+## What CloudBridge does
 
-Many teams have AWS CloudFormation templates but need to move quickly toward Google Cloud. Manually translating infrastructure is slow and error-prone, especially around IAM, databases, and security posture.
+CloudBridge takes an AWS CloudFormation YAML template and produces:
 
-CloudBridge takes a small CloudFormation YAML/JSON file and produces:
+1. a readable AWS → GCP architecture mapping,
+2. starter Google Cloud Terraform,
+3. an explainable compliance/security report,
+4. optional AWS/GCP/conversion architecture diagrams.
 
-1. a GCP architecture mapping,
-2. starter Terraform files, and
-3. a simple compliance report.
-
-This is **not** a full migration platform. It is a focused ADK workflow demo.
-
----
-
-## MVP scope
-
-### Supported input resources
-
-| AWS resource | GCP target |
-|---|---|
-| VPC + subnets | VPC + subnets |
-| EC2 instance or launch template | Compute Engine VM / instance template |
-| RDS PostgreSQL | Cloud SQL PostgreSQL |
-| S3 bucket | Cloud Storage bucket |
-| IAM role/policy | Service account + IAM bindings |
-
-### Expected output
-
-```text
-output/
-  main.tf
-  variables.tf
-  iam.tf
-  outputs.tf
-  architecture_summary.md
-  compliance_report.md
-```
-
-### Non-goals
-
-- No complete CloudFormation coverage.
-- No automatic production deployment of generated Terraform.
-- No deep ATO automation.
-- No broad AWS-to-GCP service catalog.
-- No complex UI required; ADK web UI or Cloud Run is enough.
+This is **not** a full migration platform or production deployment engine. It is a working ADK workflow that generates a first draft for review.
 
 ---
 
-## Repository layout
+## Current agent design
+
+The live ADK app is implemented in:
 
 ```text
-.
-├── README.md
-├── input/
-│   └── sample-three-tier.yaml
-├── output/
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── iam.tf
-│   ├── outputs.tf
-│   ├── architecture_summary.md
-│   └── compliance_report.md
-└── app/
-    ├── __init__.py
-    ├── agent.py
-    ├── agent_engine_app.py
-    └── app_utils/
+app/agent.py
 ```
 
-The main implementation is split across:
+The root agent is a conversational coordinator:
 
 ```text
-app/agent.py              # conversational root agent + conversion pipeline
-app/cloudbridge_tools.py  # safe file helper + deterministic test helpers
-app/parser.py             # CloudFormation parser
-app/terraform_gen.py      # starter Terraform generation
-app/compliance.py         # explainable compliance checks
+cloudbridge_architect  (LlmAgent)
 ```
 
-CloudBridge uses a conversational root agent so it can talk with the human,
-list/read files, ask for missing input, and only run the full conversion when the
-user asks. The conversion path is a simple ADK `SequentialAgent` pipeline
-inspired by the hackathon scaffold: load source, translate architecture, write
-Terraform, review compliance.
+It talks with the user, lists/reads project files, asks clarifying questions, and only delegates to the conversion pipeline when the user explicitly asks to convert, migrate, generate Terraform, or create a GCP bundle.
 
----
-
-## Agent flow
+The conversion pipeline is:
 
 ```text
-User request
-    │
-    ▼
-cloudbridge_architect  (conversational LlmAgent)
-    │
-    ├── talks with user, lists/reads project files, asks clarifying questions
-    │
-    └── conversion_pipeline  (SequentialAgent; only when conversion is requested)
-          │
-          ├── source_loader        # reads input/sample*.yaml
-          ├── translator           # maps AWS resources to Google Cloud
-          ├── terraform_writer     # emits main.tf, variables.tf, iam.tf, outputs.tf
-          └── compliance_reviewer  # reports PASS/FAIL findings and fixes
+conversion_pipeline  (SequentialAgent)
+  ├── source_loader          reads the selected CloudFormation template
+  ├── translator             maps AWS resources/risks to Google Cloud architecture
+  ├── terraform_writer       emits main.tf, variables.tf, iam.tf, outputs.tf
+  ├── compliance_reviewer    reports status, severity, remediations, residual review
+  └── output_writer          asks approve/cancel, then writes output files
 ```
 
-Runtime tooling is intentionally tiny:
-
-- `list_project_files(scope)`
-- `read_project_file(path)` with safe path checks
-
-The deterministic parser/generator/compliance helpers remain in the repo for
-unit tests and fallback scripts, but the playground path is agent-led.
-
-One-line demo narrative:
-
-```text
-Open CloudBridge → chat/list/read files as needed → ask to convert input/sample-three-tier.yaml → the pipeline loads, maps, generates Terraform, and reviews compliance in one response.
-```
-
-### What happens when you say “hi”
-
-The ADK app starts at `app/agent.py` with this root agent:
-
-```python
-root_agent = LlmAgent(name="cloudbridge_architect", ...)
-```
-
-When a user types a simple greeting like `hi`, ADK sends the message to
-`cloudbridge_architect` first. This is a conversational coordinator, not the
-conversion pipeline. Its instructions explicitly say not to run conversion for
-every message. So for `hi`, it should just greet the user, explain what
-CloudBridge can do, and ask what architecture task or input template the user
-wants to work with.
+### What happens when you say `hi`
 
 ```text
 User: hi
@@ -151,16 +57,9 @@ cloudbridge_architect
 Conversational response only. No Terraform generation yet.
 ```
 
-The full conversion flow lives in the same file as:
+The root agent should greet the user, explain CloudBridge capabilities, and ask what the user wants to inspect or convert.
 
-```python
-conversion_pipeline = SequentialAgent(
-    sub_agents=[source_loader, translator, terraform_writer, compliance_reviewer]
-)
-```
-
-That pipeline runs only when the user clearly asks to convert, migrate, generate
-Terraform, or create a GCP bundle for a CloudFormation file.
+### What happens when you ask for conversion
 
 ```text
 User: convert input/sample-three-tier-insecure.yaml to a GCP bundle
@@ -169,20 +68,122 @@ cloudbridge_architect delegates to conversion_pipeline
   ↓
 source_loader reads the CloudFormation template
   ↓
-translator maps AWS resources and risks to Google Cloud architecture
+translator creates AWS → GCP mapping
   ↓
 terraform_writer generates starter Terraform fenced blocks
   ↓
-compliance_reviewer returns the final bundle plus PASS/FAIL findings
+compliance_reviewer explains source risks, remediations, and residual review items
+  ↓
+output_writer asks approve/cancel
+  ↓
+if approved, files are written under output/
+```
+
+---
+
+## Human-in-the-loop writes
+
+CloudBridge does **not** silently overwrite files. The final `output_writer` uses ADK's human choice tool and asks the user to approve or cancel.
+
+On approval, it writes:
+
+```text
+output/main.tf
+output/variables.tf
+output/iam.tf
+output/outputs.tf
+output/architecture_summary.md
+output/compliance_report.md
+```
+
+---
+
+## Compliance output
+
+The compliance report is designed to be more useful than a one-word PASS. It uses these statuses:
+
+- `PASS` — no meaningful source risks and generated Terraform is clean.
+- `PASS WITH REMEDIATIONS` — the AWS source had risks, but the generated GCP Terraform mitigates them.
+- `NEEDS REVIEW` — generated Terraform is mostly safe, but assumptions require human validation.
+- `FAIL` — generated Terraform still contains a high-risk issue.
+
+The report includes:
+
+- top remediations applied, with severity,
+- what AWS resources were converted to what GCP targets,
+- source risks detected,
+- remediations in generated Terraform,
+- residual human-review items.
+
+---
+
+## Supported/demo input architectures
+
+Sample CloudFormation inputs live in `input/`:
+
+```text
+input/sample-three-tier.yaml
+input/sample-three-tier-insecure.yaml
+input/static-site-cloudfront-s3.yaml
+input/lambda-reverse-proxy.yaml
+input/serverless-event-pipeline.yaml
+```
+
+These cover:
+
+| Input | Architecture |
+|---|---|
+| `sample-three-tier.yaml` | VPC, subnets, EC2/LaunchTemplate, RDS PostgreSQL, S3, IAM |
+| `sample-three-tier-insecure.yaml` | Same pattern with intentional public DB/S3/IAM/network risks |
+| `static-site-cloudfront-s3.yaml` | CloudFront + private S3 static website |
+| `lambda-reverse-proxy.yaml` | API Gateway HTTP API + Lambda reverse proxy |
+| `serverless-event-pipeline.yaml` | S3 → SQS/DLQ → Lambda → DynamoDB event pipeline |
+
+The LLM agents can reason about broader AWS/GCP architecture. The deterministic helper parser/generator is intentionally smaller and exists mainly for tests and fallback utilities.
+
+---
+
+## Repository layout
+
+```text
+.
+├── README.md
+├── Team4_CloudBridge_OnePager.docx
+├── input/
+├── output/
+│   ├── *.tf
+│   ├── architecture_summary.md
+│   ├── compliance_report.md
+│   ├── aws-to-gcp-ascii-flow.md
+│   └── diagrams/
+├── scripts/
+│   └── generate_diagrams.py
+├── app/
+│   ├── agent.py
+│   ├── cloudbridge_tools.py
+│   ├── parser.py
+│   ├── terraform_gen.py
+│   ├── compliance.py
+│   └── agent_engine_app.py
+└── tests/
+```
+
+Important files:
+
+```text
+app/agent.py              ADK conversational root + conversion pipeline
+app/cloudbridge_tools.py  safe file tools, approved writer, deterministic helpers
+app/parser.py             CloudFormation parser used by tests/fallbacks
+app/terraform_gen.py      deterministic starter Terraform helper
+app/compliance.py         deterministic compliance helper
+scripts/generate_diagrams.py optional diagram generator, not part of ADK runtime
 ```
 
 ---
 
 ## Optional architecture diagrams
 
-CloudBridge also includes a separate, manual diagram generator so the working ADK
-agent flow stays untouched. It uses Graphviz and the Python `diagrams` package to
-create AWS source, GCP target, and AWS→GCP conversion diagrams.
+CloudBridge includes a separate manual diagram generator so the working ADK playground flow stays untouched. It uses Graphviz and the Python `diagrams` package to create AWS source, GCP target, and AWS→GCP conversion diagrams.
 
 Generate diagrams for every sample input:
 
@@ -205,43 +206,15 @@ output/diagrams/
   conversion-*.png / conversion-*.svg
 ```
 
-This script is intentionally not part of the live ADK playground path.
+This script is intentionally not part of the live ADK agent path.
 
 ---
 
-## Compliance rules
+## Quick start in Cloud Shell / local
 
-The compliance gate is deliberately small and explainable:
-
-1. **No public database**  
-   Cloud SQL should not expose a public IP in the generated plan.
-
-2. **No wildcard or owner-style IAM**  
-   Generated IAM should avoid `roles/owner`, wildcard-like permissions, and broad admin roles.
-
-3. **Storage/database protection**  
-   Cloud Storage and Cloud SQL should include protection settings or document managed defaults.
-
-The report format is simple:
-
-```text
-Status: PASS or FAIL
-Findings:
-- rule_id
-- severity
-- resource
-- issue
-- recommended_fix
-```
-
----
-
-## Quick start locally
-
-From the repo root:
+Install dependencies:
 
 ```bash
-cd /Users/bhatiar3/ai_projects/agentic-era-hack
 uv sync
 ```
 
@@ -251,78 +224,69 @@ Run tests:
 make test
 ```
 
-Run the ADK web UI from the repository root:
+Run lint/checks:
+
+```bash
+make lint
+```
+
+Start the ADK playground:
 
 ```bash
 make playground
 ```
 
-Then open:
+`make playground` sets Vertex AI mode for the current GCP project:
 
 ```text
-http://localhost:8000
+GOOGLE_GENAI_USE_VERTEXAI=true
+GOOGLE_CLOUD_LOCATION=global
 ```
 
-Select the `app` agent and ask questions like:
+In ADK Web, select the `app` folder and try:
 
 ```text
 hi
 list input files
-convert input/sample-three-tier.yaml to a GCP bundle
-review input/sample-three-tier-insecure.yaml
+convert input/sample-three-tier-insecure.yaml to a GCP bundle
+generate a compliance review for input/static-site-cloudfront-s3.yaml
 ```
 
 ---
 
-## Deploy to GCP Cloud Run
+## GCP deploy note
 
-Use the ADK Cloud Run deploy path for the hackathon lab:
+The project keeps the Agent Starter Pack shape:
+
+- `app/agent.py` exports `root_agent`, which ADK expects.
+- `app/agent.py` exports `app = App(...)` for Agent Engine compatibility.
+- `app/agent_engine_app.py` provides the Agent Engine wrapper.
+
+Use the provided Makefile target when ready:
 
 ```bash
-export GOOGLE_CLOUD_PROJECT="<lab-project-id>"
-export GOOGLE_CLOUD_LOCATION="us-central1"
-export GOOGLE_GENAI_USE_VERTEXAI=True
-
-adk deploy cloud_run \
-  --project="$GOOGLE_CLOUD_PROJECT" \
-  --region="$GOOGLE_CLOUD_LOCATION" \
-  --service_name="cloudbridge" \
-  --with_ui \
-  ./app
+make deploy
 ```
-
-Notes:
-
-- `app/agent.py` defines `root_agent`, which ADK expects.
-- `app/agent.py` also exports `app = App(...)` for Agent Engine.
-- `pyproject.toml` contains runtime dependencies.
 
 ---
 
 ## Demo script
 
-1. Open the ADK web UI or deployed Cloud Run URL.
-2. Paste a small CloudFormation YAML/JSON template.
-3. Show parsed resources and unsupported-resource warnings if any.
-4. Show the AWS → GCP mapping.
-5. Show generated Terraform files.
-6. Show compliance report.
-7. Include one bad IAM or public database example to show `FAIL → fix_agent → output`.
+1. Open ADK Web with `make playground`.
+2. Say `hi` to show the conversational coordinator does not run conversion immediately.
+3. Ask `list input files`.
+4. Run `convert input/sample-three-tier-insecure.yaml to a GCP bundle`.
+5. Show AWS → GCP mapping, generated Terraform, and compliance report.
+6. Approve the output writer when prompted.
+7. Show files under `output/`.
+8. Optionally show pre-generated diagrams under `output/diagrams/`.
 
 ---
 
-## Important ADK note
+## Definition of done for the hackathon demo
 
-The current demo uses Google ADK with a conversational `LlmAgent` root and a
-`SequentialAgent` conversion pipeline. The project pins ADK 2 beta in
-`pyproject.toml`, and `make playground` forces Vertex AI mode so the app uses the
-lab GCP project rather than a Gemini API key.
-
----
-
-## Definition of done for hackathon
-
-- One sample CloudFormation file works end-to-end.
-- Output includes Terraform files and a compliance report.
-- Compliance routing demonstrates PASS and one fixable FAIL.
-- The app runs locally with ADK and deploys to Cloud Run in the lab project.
+- Conversational root agent works in ADK Web.
+- Conversion pipeline runs only on explicit conversion requests.
+- Human approval is required before writing files.
+- Output includes Terraform, architecture summary, compliance report, and optional diagrams.
+- `make lint` and `make test` pass.
