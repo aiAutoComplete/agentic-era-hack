@@ -43,14 +43,14 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.apps import App
-from google.adk.tools import FunctionTool
 
 from .cloudbridge_tools import (
+    commit_staged_output_package,
     convert_cloudformation_to_gcp,
     list_project_files,
     read_input_template,
     read_project_file,
-    write_outputs_and_generate_diagrams,
+    stage_output_package,
 )
 
 MODEL_NAME = os.getenv("CLOUDBRIDGE_MODEL", "gemini-3-flash-preview")
@@ -229,16 +229,11 @@ Keep it concise, but more useful than a one-word PASS.
     output_key="compliance_report",
 )
 
-approved_output_writer_tool = FunctionTool(
-    write_outputs_and_generate_diagrams,
-    require_confirmation=True,
-)
-
 output_writer = LlmAgent(
     name="output_writer",
     model=MODEL,
     description="Asks for human approval, then writes CloudBridge files to output/ and generates diagrams.",
-    tools=[approved_output_writer_tool],
+    tools=[stage_output_package],
     instruction="""You are the output writer.
 
 Inputs:
@@ -255,12 +250,10 @@ Inputs:
 {compliance_report}
 </compliance_report>
 
-Call write_outputs_and_generate_diagrams with terraform_bundle, compliance_report, and gcp_plan.
-The tool requires ADK human confirmation before it executes, so the user can approve or reject the write.
-If the human rejects the confirmed tool call, do not retry automatically; report that output writing was cancelled.
-After approval, this must write output/main.tf, output/variables.tf, output/iam.tf, output/outputs.tf, output/architecture_summary.md, and output/compliance_report.md.
-After approved writing, the tool also runs `uv run --with diagrams python scripts/generate_diagrams.py --all` and generates diagrams under output/diagrams/.
-Report the written output files and a short count of generated diagram files.
+Call stage_output_package with terraform_bundle, compliance_report, and gcp_plan.
+Do not write output files yet.
+Tell the user exactly: Reply yes to write output files, create diagrams, verify everything, and complete the CloudBridge run.
+Do not say the run is complete yet.
 """.strip(),
     output_key="write_result",
 )
@@ -284,7 +277,7 @@ root_agent = LlmAgent(
     name="cloudbridge_architect",
     model=MODEL,
     description="Conversational CloudBridge AWS-to-GCP architecture assistant.",
-    tools=[list_project_files, read_project_file, approved_output_writer_tool],
+    tools=[list_project_files, read_project_file, commit_staged_output_package],
     sub_agents=[conversion_pipeline],
     instruction="""You are CloudBridge Architect, a conversational AWS-to-Google Cloud migration assistant.
 
@@ -298,8 +291,9 @@ You can directly help with:
 - asking clarifying questions when the user has not chosen an input template
 
 When the user clearly asks to convert, migrate, generate Terraform, or create a GCP bundle for a CloudFormation file, delegate to the sub-agent named conversion_pipeline.
-If ADK returns to you after the user approves a pending write_outputs_and_generate_diagrams tool confirmation, continue that confirmed tool call so output files are actually written.
-Do not call write_outputs_and_generate_diagrams from scratch unless the generated terraform_bundle, compliance_report, and gcp_plan are present in the conversation/state.
+If the user replies exactly "yes" after output_writer staged a package, call commit_staged_output_package with approval="yes".
+Only tell the user the agent run is complete when commit_staged_output_package returns status="complete".
+If verification fails, report the failure and do not claim completion.
 
 Good interaction pattern:
 1. If no file is named, list input files and ask which one to use.

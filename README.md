@@ -44,7 +44,7 @@ conversion_pipeline  (SequentialAgent)
   ├── translator             maps AWS resources/risks to Google Cloud architecture
   ├── terraform_writer       emits main.tf, variables.tf, iam.tf, outputs.tf
   ├── compliance_reviewer    reports status, severity, remediations, residual review
-  └── output_writer          asks approve/cancel, then writes output files
+  └── output_writer          stages files, then asks for yes before writing
 ```
 
 ### What happens when you say `hi`
@@ -74,18 +74,20 @@ terraform_writer generates starter Terraform fenced blocks
   ↓
 compliance_reviewer explains source risks, remediations, and residual review items
   ↓
-output_writer asks approve/cancel
+output_writer stages the package
   ↓
-if approved, files are written under output/
+user replies yes
+  ↓
+files and diagrams are written, verified, then completion is reported
 ```
 
 ---
 
 ## Human-in-the-loop writes
 
-CloudBridge does **not** silently overwrite files. The final `output_writer` uses ADK tool confirmation, so the write tool does not execute until the user approves it.
+CloudBridge does **not** silently overwrite files. The final `output_writer` stages the package and asks the user to reply exactly `yes`. Only then does CloudBridge write files, generate diagrams, verify artifacts, and report completion.
 
-On approval, it writes:
+On `yes`, it writes:
 
 ```text
 output/main.tf
@@ -96,7 +98,7 @@ output/architecture_summary.md
 output/compliance_report.md
 ```
 
-It then runs:
+It then runs and verifies non-empty diagram artifacts:
 
 ```bash
 uv run --with diagrams python scripts/generate_diagrams.py --all

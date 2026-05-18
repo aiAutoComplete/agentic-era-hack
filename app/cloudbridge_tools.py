@@ -16,6 +16,15 @@ from .terraform_gen import generate_terraform
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INPUT_DIR = REPO_ROOT / "input"
 OUTPUT_DIR = REPO_ROOT / "output"
+PENDING_OUTPUT_PATH = REPO_ROOT / ".cloudbridge_pending_outputs.json"
+EXPECTED_OUTPUT_FILES = (
+    "main.tf",
+    "variables.tf",
+    "iam.tf",
+    "outputs.tf",
+    "architecture_summary.md",
+    "compliance_report.md",
+)
 _ALLOWED_ROOTS = {
     REPO_ROOT / "README.md",
     REPO_ROOT / "CLOUDBRIDGE_REDESIGN_NOTES.md",
@@ -286,8 +295,8 @@ def run_compliance_review(
 def write_project_files_after_approval(
     files: dict[str, str], approval: str
 ) -> dict[str, Any]:
-    """Write output files only when approval is exactly approve/approved."""
-    if approval.strip().lower() not in {"approve", "approved", "yes approve"}:
+    """Write output files only when approval is explicit."""
+    if approval.strip().lower() not in {"yes", "approve", "approved", "yes approve"}:
         return {"status": "not_written", "reason": "Human approval was not explicit."}
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -314,21 +323,11 @@ def _extract_fenced_files(text: str) -> dict[str, str]:
     return files
 
 
-def write_generated_output_files(
+def _prepare_generated_output_files(
     terraform_bundle: str,
     compliance_report: str,
-    approval: str,
     gcp_plan: str = "",
-) -> dict[str, Any]:
-    """Write generated Terraform/report files to output/ after human approval.
-
-    Args:
-        terraform_bundle: Text containing fenced Terraform blocks tagged as
-            main.tf, variables.tf, iam.tf, and outputs.tf.
-        compliance_report: Final compliance report text to write as markdown.
-        approval: Human approval. Must be approve/approved/yes approve.
-        gcp_plan: Optional architecture mapping markdown for architecture_summary.md.
-    """
+) -> dict[str, str] | dict[str, Any]:
     files = _extract_fenced_files(terraform_bundle)
     missing = [
         name
@@ -336,13 +335,64 @@ def write_generated_output_files(
         if name not in files
     ]
     if missing:
-        return {"status": "not_written", "reason": f"Missing fenced files: {missing}"}
+        return {"status": "not_prepared", "reason": f"Missing fenced files: {missing}"}
 
+    files["architecture_summary.md"] = (
+        gcp_plan.strip() or "# Architecture Summary\n\nNo GCP plan was provided."
+    ) + "\n"
     files["compliance_report.md"] = compliance_report.strip() + "\n"
-    if gcp_plan.strip():
-        files["architecture_summary.md"] = gcp_plan.strip() + "\n"
+    return files
 
-    return write_project_files_after_approval(files, approval)
+
+def verify_output_files(written_files: dict[str, str]) -> dict[str, Any]:
+    """Verify expected output files exist and are non-empty."""
+    missing = []
+    verified = []
+    for name in EXPECTED_OUTPUT_FILES:
+        rel = written_files.get(name, f"output/{name}")
+        path = (REPO_ROOT / rel).resolve()
+        if path.exists() and path.is_file() and path.stat().st_size > 0:
+            verified.append(rel)
+        else:
+            missing.append(rel)
+    if missing:
+        return {"status": "failed", "missing_or_empty": missing, "files": verified}
+    return {"status": "verified", "files": verified}
+
+
+def write_generated_output_files(
+    terraform_bundle: str,
+    compliance_report: str,
+    approval: str,
+    gcp_plan: str = "",
+) -> dict[str, Any]:
+    """Write generated Terraform/report files to output/ after human approval."""
+    files = _prepare_generated_output_files(
+        terraform_bundle, compliance_report, gcp_plan
+    )
+    if files.get("status") == "not_prepared":
+        return {"status": "not_written", "reason": files["reason"]}
+    return write_project_files_after_approval(files, approval)  # type: ignore[arg-type]
+
+
+def stage_output_package(
+    terraform_bundle: str,
+    compliance_report: str,
+    gcp_plan: str = "",
+) -> dict[str, Any]:
+    """Stage generated outputs and ask the user to type exactly 'yes'."""
+    files = _prepare_generated_output_files(
+        terraform_bundle, compliance_report, gcp_plan
+    )
+    if files.get("status") == "not_prepared":
+        return files
+    PENDING_OUTPUT_PATH.write_text(json.dumps({"files": files}, indent=2))
+    return {
+        "status": "pending_approval",
+        "approval_required": "yes",
+        "expected_output_files": [f"output/{name}" for name in EXPECTED_OUTPUT_FILES],
+        "message": "Reply exactly 'yes' to write files, generate diagrams, verify artifacts, and complete the run.",
+    }
 
 
 def generate_architecture_diagrams() -> dict[str, Any]:
@@ -380,10 +430,82 @@ def generate_architecture_diagrams() -> dict[str, Any]:
             "reason": (result.stderr or result.stdout)[-1200:],
         }
 
-    diagrams = sorted(
-        str(path.relative_to(REPO_ROOT)) for path in (OUTPUT_DIR / "diagrams").glob("*")
+    verification = verify_diagram_files()
+    if verification["status"] != "verified":
+        return {
+            "status": "not_generated",
+            "reason": "Diagram files were not verified after generation.",
+            "verification": verification,
+        }
+    return {**verification, "status": "generated"}
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def verify_diagram_files() -> dict[str, Any]:
+    """Verify generated diagram artifacts exist and are non-empty."""
+    diagram_dir = OUTPUT_DIR / "diagrams"
+    paths = sorted(
+        path
+        for path in diagram_dir.glob("*")
+        if path.is_file() and path.stat().st_size > 0
     )
-    return {"status": "generated", "files": diagrams}
+    files = [_display_path(path) for path in paths]
+    has_png = any(path.suffix == ".png" for path in paths)
+    has_svg = any(path.suffix == ".svg" for path in paths)
+    has_readme = any(path.name == "README.md" for path in paths)
+    if not (has_png and has_svg and has_readme):
+        return {
+            "status": "failed",
+            "reason": "Expected non-empty PNG, SVG, and README diagram artifacts.",
+            "files": files,
+        }
+    return {"status": "verified", "count": len(files), "files": files}
+
+
+def commit_staged_output_package(approval: str) -> dict[str, Any]:
+    """When approval is exactly 'yes', write staged outputs, diagrams, and verify all artifacts."""
+    if approval.strip().lower() != "yes":
+        return {"status": "not_written", "reason": "Approval must be exactly 'yes'."}
+    if not PENDING_OUTPUT_PATH.exists():
+        return {
+            "status": "not_written",
+            "reason": "No staged CloudBridge output package found.",
+        }
+
+    payload = json.loads(PENDING_OUTPUT_PATH.read_text())
+    write_result = write_project_files_after_approval(payload["files"], "yes")
+    output_check = verify_output_files(write_result.get("files", {}))
+    if write_result.get("status") != "written" or output_check["status"] != "verified":
+        return {
+            "status": "failed",
+            "write": write_result,
+            "output_verification": output_check,
+            "diagrams": {"status": "skipped"},
+        }
+
+    diagram_result = generate_architecture_diagrams()
+    if diagram_result.get("status") != "generated":
+        return {
+            "status": "failed",
+            "write": write_result,
+            "output_verification": output_check,
+            "diagrams": diagram_result,
+        }
+
+    PENDING_OUTPUT_PATH.unlink(missing_ok=True)
+    return {
+        "status": "complete",
+        "write": write_result,
+        "output_verification": output_check,
+        "diagrams": diagram_result,
+        "message": "CloudBridge agent run complete. Output files and diagrams were written and verified.",
+    }
 
 
 def write_outputs_and_generate_diagrams(
@@ -391,18 +513,11 @@ def write_outputs_and_generate_diagrams(
     compliance_report: str,
     gcp_plan: str = "",
 ) -> dict[str, Any]:
-    """Write generated outputs after ADK tool confirmation, then generate diagrams."""
-    write_result = write_generated_output_files(
-        terraform_bundle=terraform_bundle,
-        compliance_report=compliance_report,
-        gcp_plan=gcp_plan,
-        approval="approve",
-    )
-    if write_result.get("status") != "written":
-        return {"write": write_result, "diagrams": {"status": "skipped"}}
-
-    diagram_result = generate_architecture_diagrams()
-    return {"write": write_result, "diagrams": diagram_result}
+    """Backward-compatible immediate write path for tests/imports."""
+    stage = stage_output_package(terraform_bundle, compliance_report, gcp_plan)
+    if stage.get("status") != "pending_approval":
+        return {"write": stage, "diagrams": {"status": "skipped"}}
+    return commit_staged_output_package("yes")
 
 
 # Backward-compatible helpers used by existing tests/imports.

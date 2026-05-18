@@ -4,9 +4,11 @@ import pytest
 
 from app.agent import convert_cloudformation_to_gcp, read_input_template
 from app.cloudbridge_tools import (
+    commit_staged_output_package,
     generate_architecture_diagrams,
     read_project_file,
     run_compliance_review,
+    stage_output_package,
     write_generated_output_files,
 )
 from app.compliance import compliance_check
@@ -77,6 +79,11 @@ def test_generate_architecture_diagrams_runs_requested_uv_command(
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
+        diagram_dir = tmp_path / "diagrams"
+        diagram_dir.mkdir(parents=True)
+        (diagram_dir / "aws-test.png").write_bytes(b"png")
+        (diagram_dir / "aws-test.svg").write_text("<svg />")
+        (diagram_dir / "README.md").write_text("# Diagrams")
 
         class Result:
             returncode = 0
@@ -130,9 +137,42 @@ output "network" { value = "main" }
         terraform_bundle=terraform_bundle,
         compliance_report="# Compliance\n",
         gcp_plan="# Plan\n",
-        approval="approve",
+        approval="yes",
     )
     assert written["status"] == "written"
     assert (tmp_path / "main.tf").exists()
     assert (tmp_path / "compliance_report.md").exists()
     assert (tmp_path / "architecture_summary.md").exists()
+
+
+def test_stage_then_commit_writes_and_verifies_outputs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.cloudbridge_tools.OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(
+        "app.cloudbridge_tools.PENDING_OUTPUT_PATH", tmp_path / "pending.json"
+    )
+    monkeypatch.setattr(
+        "app.cloudbridge_tools.generate_architecture_diagrams",
+        lambda: {"status": "generated", "count": 3, "files": ["output/diagrams/a.png"]},
+    )
+    terraform_bundle = """```main.tf
+resource "google_compute_network" "main" {}
+```
+```variables.tf
+variable "project_id" { type = string }
+```
+```iam.tf
+# iam
+```
+```outputs.tf
+output "network" { value = "main" }
+```"""
+
+    staged = stage_output_package(terraform_bundle, "# Compliance", "# Plan")
+    assert staged["status"] == "pending_approval"
+    assert staged["approval_required"] == "yes"
+
+    result = commit_staged_output_package("yes")
+    assert result["status"] == "complete"
+    assert result["output_verification"]["status"] == "verified"
+    assert (tmp_path / "main.tf").exists()
+    assert (tmp_path / "compliance_report.md").exists()
