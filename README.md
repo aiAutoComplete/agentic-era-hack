@@ -60,7 +60,7 @@ make clean-output
 
 ## Architecture at a glance
 
-![CloudBridge ADK flow](docs/assets/cloudbridge-adk-flow.svg)
+![CloudBridge ADK flow](docs/assets/cloudbridge-adk-flow.png)
 
 The diagram is generated with the Python `diagrams` package and Graphviz:
 
