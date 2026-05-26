@@ -21,6 +21,43 @@ This is **not** a full migration platform or production deployment engine. It is
 
 ---
 
+## 5-minute team showcase
+
+From a clean checkout, this is the fastest path to show the project:
+
+```bash
+make install
+make test
+make lint
+make demo-diagrams
+make playground
+```
+
+In ADK Web, select the `app` folder and use this short script:
+
+```text
+hi
+list input files
+convert input/sample-three-tier-insecure.yaml to a GCP bundle
+yes
+```
+
+What to show:
+
+- the conversational greeting does not trigger conversion immediately,
+- the agent lists the sample CloudFormation inputs,
+- the conversion produces a GCP architecture plan, Terraform, and compliance report,
+- the `yes` step writes reviewed artifacts under `output/` and verifies diagrams,
+- generated files are intentionally ignored by git and can be recreated at any time.
+
+Reset the workspace after a demo:
+
+```bash
+make clean-output
+```
+
+---
+
 ## Current agent design
 
 The live ADK app is implemented in:
@@ -163,11 +200,7 @@ The LLM agents can reason about broader AWS/GCP architecture. The deterministic 
 ├── Team4_CloudBridge_OnePager.docx
 ├── input/
 ├── output/
-│   ├── *.tf
-│   ├── architecture_summary.md
-│   ├── compliance_report.md
-│   ├── aws-to-gcp-ascii-flow.md
-│   └── diagrams/
+│   └── .gitkeep
 ├── scripts/
 │   └── generate_diagrams.py
 ├── app/
@@ -197,6 +230,8 @@ app/diagram_pipeline.py   post-approval manifest + standards diagram package
 docs/diagram_pipeline.md  detailed diagram package workflow
 ```
 
+`output/` is generated-only. The repository tracks `output/.gitkeep` so the folder exists, but Terraform, reports, and rendered diagrams are created by the agent or scripts during a demo.
+
 ---
 
 ## Optional architecture diagrams
@@ -206,7 +241,7 @@ CloudBridge includes a separate manual diagram generator so the working ADK play
 Generate diagrams for every sample input:
 
 ```bash
-uv run --with diagrams python scripts/generate_diagrams.py --all
+make demo-diagrams
 ```
 
 Generate diagrams for one input:
@@ -224,7 +259,7 @@ output/diagrams/
   conversion-*.png / conversion-*.svg
 ```
 
-This script is intentionally not part of the live ADK agent path.
+These outputs are ignored by git because they are reproducible demo artifacts. This script is intentionally not part of the live ADK agent path.
 
 ### Post-approval diagram package
 
@@ -260,6 +295,12 @@ Run lint/checks:
 
 ```bash
 make lint
+```
+
+Generate optional demo diagrams:
+
+```bash
+make demo-diagrams
 ```
 
 Start the ADK playground:
@@ -311,7 +352,8 @@ make deploy
 5. Show AWS → GCP mapping, generated Terraform, and compliance report.
 6. Approve the output writer when prompted.
 7. Show files under `output/`.
-8. Optionally show pre-generated diagrams under `output/diagrams/`.
+8. Show generated diagrams under `output/diagrams/`.
+9. Run `make clean-output` when you want to reset generated artifacts.
 
 ---
 

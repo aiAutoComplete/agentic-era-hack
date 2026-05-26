@@ -1,9 +1,9 @@
 [project]
 name = "cloud-bridge"
 version = "0.1.0"
-description = ""
+description = "Google ADK demo for AWS CloudFormation to GCP Terraform, compliance review, and diagrams"
 authors = [
-    {name = "Your Name", email = "your@email.com"},
+    {name = "CloudBridge Team"},
 ]
 dependencies = [
     "google-adk==2.0.0b1",

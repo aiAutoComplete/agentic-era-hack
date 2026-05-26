@@ -62,6 +62,14 @@ test:
 	uv sync --dev
 	uv run pytest tests/unit && uv run pytest tests/integration
 
+# Generate demo diagrams from the sample CloudFormation inputs
+demo-diagrams:
+	uv run --with diagrams python scripts/generate_diagrams.py --all
+
+# Remove generated demo artifacts while keeping output/.gitkeep
+clean-output:
+	find output -mindepth 1 ! -name .gitkeep -exec rm -rf {} +
+
 # ==============================================================================
 # Agent Evaluation
 # ==============================================================================
