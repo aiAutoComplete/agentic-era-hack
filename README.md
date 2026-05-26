@@ -1,68 +1,54 @@
 # CloudBridge
 
-**AWS CloudFormation → Google Cloud architecture, Terraform, compliance review, and diagrams**  
-**Google ADK hackathon MVP**
+**Google ADK demo for turning AWS infrastructure standards into GCP-native Terraform, compliance review, and architecture diagrams**
 
-CloudBridge is a focused Google ADK demo for helping a human understand and migrate AWS CloudFormation architectures to Google Cloud. It is intentionally small, conversational, and demo-friendly: the agent can talk first, inspect files, ask which template to use, run a conversion pipeline on demand, review security posture, and write output files only after human approval.
+CloudBridge is a showcase project for explaining how a small Google ADK agent workflow can help a team reason about AWS infrastructure patterns and produce a first-pass Google Cloud implementation for human review. The point is not blind conversion. The point is standards transfer.
 
----
+## The Problem
 
-## What CloudBridge does
+Teams often have useful AWS CloudFormation templates that encode years of infrastructure standards: private networking, IAM boundaries, storage posture, database protections, naming patterns, and security review expectations. When a new application is going to run on Google Cloud, the goal is usually not to copy AWS line by line. The goal is to preserve the intent and standards while building a GCP-native architecture.
 
-CloudBridge takes an AWS CloudFormation YAML template and produces:
+Doing that manually is slow, and doing it with a single prompt can be hard to review. CloudBridge breaks the work into a visible workflow:
 
-1. a readable AWS → GCP architecture mapping,
-2. starter Google Cloud Terraform,
-3. an explainable compliance/security report,
-4. optional AWS/GCP/conversion architecture diagrams,
-5. optional post-approval manifest diagrams for standards review.
+| Need | CloudBridge response |
+|---|---|
+| Understand the AWS template | Parse and summarize supported CloudFormation resources. |
+| Explain the GCP direction | Produce a readable AWS-to-GCP architecture mapping. |
+| Draft implementation files | Generate starter Terraform for review. |
+| Keep security visible | Report source risks, remediations, and residual review items. |
+| Avoid silent writes | Require explicit human approval before writing output files. |
+| Make the architecture easy to discuss | Generate diagrams from sample inputs and reviewed artifacts. |
 
-This is **not** a full migration platform or production deployment engine. It is a working ADK workflow that generates a first draft for review.
+This is not a production migration engine. It is a demo-friendly review workflow that makes the moving parts easy to inspect.
 
----
+## What This Repo Does
 
-## 5-minute team showcase
+CloudBridge provides four things:
 
-From a clean checkout, this is the fastest path to show the project:
+| Capability | Where to look |
+|---|---|
+| Conversational ADK app | `app/agent.py` |
+| Safe file and approval tools | `app/cloudbridge_tools.py` |
+| Sample AWS CloudFormation inputs | `input/*.yaml` |
+| Diagram generators | `scripts/generate_diagrams.py`, `scripts/generate_readme_adk_diagram.py`, `app/diagram_pipeline.py` |
 
-```bash
-make install
-make test
-make lint
-make demo-diagrams
-make playground
-```
+The default demo flow is:
 
-In ADK Web, select the `app` folder and use this short script:
+| Step | What happens |
+|---|---|
+| 1. Talk first | The root agent greets the user and can list or read project files. |
+| 2. Convert only on request | The conversion pipeline runs only when the user asks to convert or generate a GCP bundle. |
+| 3. Review before writing | Terraform and reports are staged first. The user must reply `yes`. |
+| 4. Write and verify | Approved files are written under `output/`, diagrams are generated, and artifacts are verified. |
+| 5. Reset easily | Generated outputs are ignored by git and can be removed with `make clean-output`. |
 
-```text
-hi
-list input files
-convert input/sample-three-tier-insecure.yaml to a GCP bundle
-yes
-```
-
-What to show:
-
-- the conversational greeting does not trigger conversion immediately,
-- the agent lists the sample CloudFormation inputs,
-- the conversion produces a GCP architecture plan, Terraform, and compliance report,
-- the `yes` step writes reviewed artifacts under `output/` and verifies diagrams,
-- generated files are intentionally ignored by git and can be recreated at any time.
-
-Reset the workspace after a demo:
-
-```bash
-make clean-output
-```
-
----
-
-## Architecture at a glance
+## Architecture At A Glance
 
 ![CloudBridge ADK flow](docs/assets/cloudbridge-adk-flow.png)
 
-The diagram is generated with the Python `diagrams` package and Graphviz:
+The README uses the PNG version because the SVG renderer from `diagrams` may not embed provider icons reliably in GitHub previews.
+
+Regenerate the diagram with:
 
 ```bash
 make readme-diagram
@@ -74,253 +60,114 @@ Graphviz must be installed first because Diagrams uses it for rendering. On macO
 brew install graphviz
 ```
 
-The generator follows the Diagrams [installation](https://diagrams.mingrammer.com/docs/getting-started/installation), [diagram guide](https://diagrams.mingrammer.com/docs/guides/diagram), and [GCP node list](https://diagrams.mingrammer.com/docs/nodes/gcp). It uses provider nodes for AWS CloudFormation, Google ADK deployment on Cloud Run, Vertex AI/Gemini, Terraform, and the target GCP services shown in the generated bundle.
+The generator follows the Diagrams [installation](https://diagrams.mingrammer.com/docs/getting-started/installation), [diagram guide](https://diagrams.mingrammer.com/docs/guides/diagram), and [GCP node list](https://diagrams.mingrammer.com/docs/nodes/gcp). It uses provider nodes for AWS CloudFormation, Google ADK deployment on Cloud Run, Vertex AI/Gemini, Terraform, and target GCP services.
 
----
+## Diagram To Code Map
 
-## Current agent design
+Use this table when walking someone through the diagram. Every major diagram element maps to a concrete place in the repo.
 
-The live ADK app is implemented in:
+| Diagram element | What it means | Code or artifact |
+|---|---|---|
+| Team reviewer | The person driving the ADK Web conversation and approving writes. | Human-in-the-loop behavior is enforced by `app/cloudbridge_tools.py::stage_output_package` and `app/cloudbridge_tools.py::commit_staged_output_package`. |
+| CloudFormation reference YAML | AWS source template or standards reference. | Demo templates live in `input/*.yaml`; parser helper is `app/parser.py::parse_cfn`. |
+| ADK Web / Cloud Run app | The running Google ADK app selected from the `app` folder. | `app/agent.py::app`, `app/agent.py::root_agent`, `Makefile::playground`, `Makefile::deploy`. |
+| `cloudbridge_architect` root agent | Conversational coordinator. It answers simple questions, reads files, and delegates conversion only when requested. | `app/agent.py::root_agent`. |
+| `conversion_pipeline` | Sequential ADK workflow for the conversion task. | `app/agent.py::conversion_pipeline`. |
+| `source_loader` | Reads the selected CloudFormation input. | `app/agent.py::source_loader`; tools from `app/cloudbridge_tools.py::list_project_files` and `app/cloudbridge_tools.py::read_project_file`. |
+| `translator` | Produces the AWS-to-GCP architecture mapping and calls out source risks. | `app/agent.py::translator`. |
+| `terraform_writer` | Drafts `main.tf`, `variables.tf`, `iam.tf`, and `outputs.tf` fenced blocks. | `app/agent.py::terraform_writer`; deterministic fallback helper is `app/terraform_gen.py::generate_terraform`. |
+| `compliance_reviewer` | Reviews source risks, generated Terraform, remediations, and residual review items. | `app/agent.py::compliance_reviewer`; deterministic helper is `app/compliance.py::compliance_check`. |
+| `output_writer` | Stages generated files and asks the user to reply `yes`. | `app/agent.py::output_writer`; staging logic is `app/cloudbridge_tools.py::stage_output_package`. |
+| Human review: `yes` | Explicit approval checkpoint before file writes and diagram generation. | `app/cloudbridge_tools.py::commit_staged_output_package`. |
+| Vertex AI / Gemini | Model backend used by the ADK agents. | `app/agent.py::MODEL`, `app/agent.py::_vertex_model_name`. |
+| Terraform bundle | Reviewable starter Terraform emitted by the writer. | Written to `output/main.tf`, `output/variables.tf`, `output/iam.tf`, `output/outputs.tf` after approval. |
+| Compliance report and architecture summary | Review packet explaining what changed and what still needs validation. | Built by `app/cloudbridge_tools.py::_prepare_generated_output_files`; written to `output/compliance_report.md` and `output/architecture_summary.md`. |
+| Architecture diagrams | Generated AWS, GCP, and conversion diagrams for visual review. | `app/cloudbridge_tools.py::generate_architecture_diagrams`; script implementation in `scripts/generate_diagrams.py`. |
+| GCP target services | The target architecture represented by generated Terraform. | `app/terraform_gen.py::generate_terraform` and the LLM output from `terraform_writer`. |
 
-```text
-app/agent.py
-```
+## Future Product Direction
 
-The root agent is a conversational coordinator:
+The strongest product direction is not "convert AWS to GCP." The stronger product is an infrastructure standards assistant: it learns from approved internal patterns, helps teams start new GCP applications correctly, and produces review artifacts that platform, security, and app teams can all understand.
 
-```text
-cloudbridge_architect  (LlmAgent)
-```
+The first wedge is simple: make it dramatically faster for a new application team to ask, "What should the GCP version of our standard architecture look like?" and get a reviewable answer with Terraform, diagrams, and risk notes.
 
-It talks with the user, lists/reads project files, asks clarifying questions, and only delegates to the conversion pipeline when the user explicitly asks to convert, migrate, generate Terraform, or create a GCP bundle.
+| Future use | Who benefits | Why it could matter |
+|---|---|---|
+| Golden-path GCP starter | Application teams | A team describes a new app, and CloudBridge generates a GCP-native Terraform starter that follows internal standards from day one. |
+| Architecture review copilot | Architects and platform leads | Before implementation, teams get a readable architecture plan, risk summary, and diagram packet for review. |
+| Standards transfer tool | Cloud platform teams | Existing AWS templates become examples of policy intent, not migration targets. CloudBridge extracts the standards and applies them to new GCP builds. |
+| Security pre-review | Security and compliance teams | Reviewers get early signals on public exposure, IAM breadth, database posture, storage controls, and missing review items. |
+| Platform enablement demo | Internal developer platform teams | Approved patterns can be shown as working code, diagrams, and review notes instead of static wiki pages. |
+| Portfolio triage | Engineering leadership | Given many templates, CloudBridge could classify patterns, unsupported services, risk hotspots, and likely GCP landing zones. |
+| Compliance evidence packet | Governance teams | Each generated design could include the architecture summary, control mapping, diagram set, and approval record needed for review. |
+| Training and onboarding | New engineers | Engineers can learn how the organization expects AWS patterns to map to GCP patterns through examples they can run. |
 
-The conversion pipeline is:
+The practical product path should stay intentionally small:
 
-```text
-conversion_pipeline  (SequentialAgent)
-  ├── source_loader          reads the selected CloudFormation template
-  ├── translator             maps AWS resources/risks to Google Cloud architecture
-  ├── terraform_writer       emits main.tf, variables.tf, iam.tf, outputs.tf
-  ├── compliance_reviewer    reports status, severity, remediations, residual review
-  └── output_writer          stages files, then asks for yes before writing
-```
-
-### What happens when you say `hi`
-
-```text
-User: hi
-  ↓
-cloudbridge_architect
-  ↓
-Conversational response only. No Terraform generation yet.
-```
-
-The root agent should greet the user, explain CloudBridge capabilities, and ask what the user wants to inspect or convert.
-
-### What happens when you ask for conversion
-
-```text
-User: convert input/sample-three-tier-insecure.yaml to a GCP bundle
-  ↓
-cloudbridge_architect delegates to conversion_pipeline
-  ↓
-source_loader reads the CloudFormation template
-  ↓
-translator creates AWS → GCP mapping
-  ↓
-terraform_writer generates starter Terraform fenced blocks
-  ↓
-compliance_reviewer explains source risks, remediations, and residual review items
-  ↓
-output_writer stages the package
-  ↓
-user replies yes
-  ↓
-files and diagrams are written, verified, then completion is reported
-```
-
----
-
-## Human-in-the-loop writes
-
-CloudBridge does **not** silently overwrite files. The final `output_writer` stages the package and asks the user to reply exactly `yes`. Only then does CloudBridge write files, generate diagrams, verify artifacts, and report completion.
-
-On `yes`, it writes:
-
-```text
-output/main.tf
-output/variables.tf
-output/iam.tf
-output/outputs.tf
-output/architecture_summary.md
-output/compliance_report.md
-```
-
-It then runs and verifies non-empty diagram artifacts:
-
-```bash
-uv run --with diagrams python scripts/generate_diagrams.py --all
-```
-
----
-
-## Compliance output
-
-The compliance report is designed to be more useful than a one-word PASS. It uses these statuses:
-
-- `PASS` — no meaningful source risks and generated Terraform is clean.
-- `PASS WITH REMEDIATIONS` — the AWS source had risks, but the generated GCP Terraform mitigates them.
-- `NEEDS REVIEW` — generated Terraform is mostly safe, but assumptions require human validation.
-- `FAIL` — generated Terraform still contains a high-risk issue.
-
-The report includes:
-
-- top remediations applied, with severity,
-- what AWS resources were converted to what GCP targets,
-- source risks detected,
-- remediations in generated Terraform,
-- residual human-review items.
-
----
-
-## Supported/demo input architectures
-
-Sample CloudFormation inputs live in `input/`:
-
-```text
-input/sample-three-tier.yaml
-input/sample-three-tier-insecure.yaml
-input/static-site-cloudfront-s3.yaml
-input/lambda-reverse-proxy.yaml
-input/serverless-event-pipeline.yaml
-```
-
-These cover:
-
-| Input | Architecture |
+| Phase | Product outcome |
 |---|---|
-| `sample-three-tier.yaml` | VPC, subnets, EC2/LaunchTemplate, RDS PostgreSQL, S3, IAM |
-| `sample-three-tier-insecure.yaml` | Same pattern with intentional public DB/S3/IAM/network risks |
-| `static-site-cloudfront-s3.yaml` | CloudFront + private S3 static website |
-| `lambda-reverse-proxy.yaml` | API Gateway HTTP API + Lambda reverse proxy |
-| `serverless-event-pipeline.yaml` | S3 → SQS/DLQ → Lambda → DynamoDB event pipeline |
+| Now | Demo a safe, human-approved ADK workflow with Terraform, compliance notes, and diagrams. |
+| Next | Add richer standards annotations, better deterministic checks, and clearer review packets. |
+| Later | Build a reusable internal catalog of approved patterns, controls, and GCP landing-zone recommendations. |
 
-The LLM agents can reason about broader AWS/GCP architecture. The deterministic helper parser/generator is intentionally smaller and exists mainly for tests and fallback utilities.
+The trap to avoid is pretending this is an automatic production migration system. The useful product is a fast, explainable starting point that makes the right review conversation happen earlier.
 
----
+## 5-Minute Team Showcase
 
-## Repository layout
-
-```text
-.
-├── README.md
-├── DSPY_STANDARDS_TRANSFER.md
-├── docs/
-│   └── diagram_pipeline.md
-├── Team4_CloudBridge_OnePager.docx
-├── input/
-├── output/
-│   └── .gitkeep
-├── scripts/
-│   └── generate_diagrams.py
-├── app/
-│   ├── agent.py
-│   ├── architecture_manifest.py
-│   ├── cloudbridge_tools.py
-│   ├── diagram_pipeline.py
-│   ├── diagram_renderers.py
-│   ├── parser.py
-│   ├── parsers/
-│   ├── terraform_gen.py
-│   ├── compliance.py
-│   └── agent_engine_app.py
-└── tests/
-```
-
-Important files:
-
-```text
-app/agent.py              ADK conversational root + conversion pipeline
-app/cloudbridge_tools.py  safe file tools, approved writer, deterministic helpers
-app/parser.py             CloudFormation parser used by tests/fallbacks
-app/terraform_gen.py      deterministic starter Terraform helper
-app/compliance.py         deterministic compliance helper
-scripts/generate_diagrams.py optional diagram generator, not part of ADK runtime
-app/diagram_pipeline.py   post-approval manifest + standards diagram package
-docs/diagram_pipeline.md  detailed diagram package workflow
-```
-
-`output/` is generated-only. The repository tracks `output/.gitkeep` so the folder exists, but Terraform, reports, and rendered diagrams are created by the agent or scripts during a demo.
-
----
-
-## Optional architecture diagrams
-
-CloudBridge includes a separate manual diagram generator so the working ADK playground flow stays untouched. It uses Graphviz and the Python `diagrams` package to create AWS source, GCP target, and AWS→GCP conversion diagrams.
-
-Generate diagrams for every sample input:
+From a clean checkout, this is the fastest path to show the project:
 
 ```bash
-make demo-diagrams
-```
-
-Generate diagrams for one input:
-
-```bash
-uv run --with diagrams python scripts/generate_diagrams.py input/lambda-reverse-proxy.yaml
-```
-
-Outputs are written to:
-
-```text
-output/diagrams/
-  aws-*.png / aws-*.svg
-  gcp-*.png / gcp-*.svg
-  conversion-*.png / conversion-*.svg
-```
-
-These outputs are ignored by git because they are reproducible demo artifacts. This script is intentionally not part of the live ADK agent path.
-
-### Post-approval diagram package
-
-For standards-transfer reviews, CloudBridge can also generate a deterministic diagram package from approved AWS reference templates and approved GCP Terraform:
-
-```bash
-uv run --with diagrams python -m app.diagram_pipeline \
-  --aws-reference path/to/aws/reference/templates \
-  --gcp-terraform path/to/approved/gcp/terraform \
-  --out output/diagrams \
-  --approved
-```
-
-This writes provider manifests, a standards-mapping manifest, Mermaid Markdown diagrams, and PNG/SVG renderings. The required `--approved` flag keeps this as a post-human-review step. See `docs/diagram_pipeline.md`.
-
----
-
-## Quick start in Cloud Shell / local
-
-Install dependencies:
-
-```bash
-uv sync
-```
-
-Run tests:
-
-```bash
+make install
 make test
-```
-
-Run lint/checks:
-
-```bash
 make lint
+make demo-diagrams
+make playground
 ```
 
-Generate optional demo diagrams:
+In ADK Web, select the `app` folder and use this script:
+
+```text
+hi
+list input files
+convert input/sample-three-tier-insecure.yaml to a GCP bundle
+yes
+```
+
+What to show during the demo:
+
+| Moment | Why it matters |
+|---|---|
+| Say `hi` first | Shows the root agent is conversational and does not run conversion immediately. |
+| Ask `list input files` | Shows the agent can inspect safe project areas. |
+| Convert the insecure sample | Shows a realistic source template with public database, broad network, IAM, and storage risks. |
+| Review the compliance output | Shows the difference between source risk and GCP remediation. |
+| Reply `yes` | Shows human approval before writing files. |
+| Open `output/` | Shows generated Terraform, reports, and diagrams. |
+
+Reset generated artifacts after a demo:
 
 ```bash
-make demo-diagrams
+make clean-output
+```
+
+## Installation
+
+Install Python dependencies with `uv`:
+
+```bash
+make install
+```
+
+Install Graphviz if you want PNG/SVG diagrams:
+
+```bash
+brew install graphviz
+```
+
+Set or confirm your Google Cloud project:
+
+```bash
+gcloud config set project YOUR_PROJECT_ID
 ```
 
 Start the ADK playground:
@@ -329,59 +176,113 @@ Start the ADK playground:
 make playground
 ```
 
-`make playground` sets Vertex AI mode for the current GCP project:
+`make playground` runs ADK Web with:
 
-```text
-GOOGLE_GENAI_USE_VERTEXAI=true
-GOOGLE_CLOUD_LOCATION=global
+| Environment variable | Value |
+|---|---|
+| `GOOGLE_GENAI_USE_VERTEXAI` | `true` |
+| `GOOGLE_CLOUD_LOCATION` | `global` |
+| `GOOGLE_CLOUD_PROJECT` | Your configured or exported project ID |
+
+## Sample Inputs
+
+The demo templates live in `input/`.
+
+| Input | Architecture pattern |
+|---|---|
+| `sample-three-tier.yaml` | VPC, subnets, EC2 or LaunchTemplate, RDS PostgreSQL, S3, IAM |
+| `sample-three-tier-insecure.yaml` | Three-tier sample with intentional public DB, S3, IAM, and network risks |
+| `static-site-cloudfront-s3.yaml` | CloudFront plus private S3 static website |
+| `lambda-reverse-proxy.yaml` | API Gateway HTTP API plus Lambda reverse proxy |
+| `serverless-event-pipeline.yaml` | S3 to SQS/DLQ to Lambda to DynamoDB event pipeline |
+
+## Generated Outputs
+
+`output/` is generated-only. The repo tracks `output/.gitkeep` so the folder exists, but generated files are ignored by git.
+
+| Generated file | Created by |
+|---|---|
+| `output/main.tf` | `output_writer` after approval |
+| `output/variables.tf` | `output_writer` after approval |
+| `output/iam.tf` | `output_writer` after approval |
+| `output/outputs.tf` | `output_writer` after approval |
+| `output/architecture_summary.md` | `output_writer` after approval |
+| `output/compliance_report.md` | `output_writer` after approval |
+| `output/diagrams/*` | `scripts/generate_diagrams.py` or `commit_staged_output_package` |
+
+## Diagram Options
+
+CloudBridge has two diagram paths.
+
+| Diagram path | Command | Purpose |
+|---|---|---|
+| README ADK flow | `make readme-diagram` | Regenerates the committed diagram used in this README. |
+| Demo input diagrams | `make demo-diagrams` | Generates AWS source, GCP target, and conversion diagrams for all sample inputs under `output/diagrams/`. |
+| One input diagram | `uv run --with diagrams python scripts/generate_diagrams.py input/lambda-reverse-proxy.yaml` | Generates diagrams for a single CloudFormation template. |
+| Post-approval standards package | `uv run --with diagrams python -m app.diagram_pipeline --aws-reference path/to/aws --gcp-terraform path/to/tf --out output/diagrams --approved` | Generates manifests, Mermaid Markdown, PNG, and SVG artifacts from reviewed infrastructure. |
+
+For more detail on the post-approval manifest path, see `docs/diagram_pipeline.md`.
+
+## Compliance Review
+
+The compliance report is designed to be more useful than a one-word pass/fail result.
+
+| Status | Meaning |
+|---|---|
+| `PASS` | No meaningful source risks and generated Terraform is clean. |
+| `PASS WITH REMEDIATIONS` | The AWS source had risks, but generated GCP Terraform mitigates them. |
+| `NEEDS REVIEW` | Terraform is mostly safe, but assumptions require human validation. |
+| `FAIL` | Generated Terraform still contains a high-risk issue. |
+
+The reviewer focuses on public databases, public buckets, open network rules, broad IAM, storage protection, database backups, private IP, and deletion protection.
+
+## Repository Guide
+
+| Path | Role |
+|---|---|
+| `app/agent.py` | ADK root agent, conversion pipeline, specialist agents, and Agent Engine app export. |
+| `app/cloudbridge_tools.py` | Safe file reads, approval staging, output writes, diagram generation, artifact verification. |
+| `app/parser.py` | Deterministic CloudFormation parser used by tests and fallback helpers. |
+| `app/terraform_gen.py` | Deterministic starter Terraform helper used by tests and fallback conversion. |
+| `app/compliance.py` | Deterministic Terraform compliance helper. |
+| `app/diagram_pipeline.py` | Post-approval standards manifest and diagram package. |
+| `scripts/generate_diagrams.py` | Sample input AWS/GCP/conversion diagram generator. |
+| `scripts/generate_readme_adk_diagram.py` | README ADK architecture diagram generator. |
+| `tests/unit/` | Unit tests for parser, generation, compliance, approvals, and diagram pipeline. |
+| `tests/integration/` | Import and Agent Engine integration checks. |
+
+## Checks
+
+Run tests:
+
+```bash
+make test
 ```
 
-In ADK Web, select the `app` folder and try:
+Run lint, formatting check, type check, and codespell:
 
-```text
-hi
-list input files
-convert input/sample-three-tier-insecure.yaml to a GCP bundle
-generate a compliance review for input/static-site-cloudfront-s3.yaml
+```bash
+make lint
 ```
 
----
-
-## GCP deploy note
+## Deploy
 
 The project keeps the Agent Starter Pack shape:
 
-- `app/agent.py` exports `root_agent`, which ADK expects.
-- `app/agent.py` exports `app = App(...)` for Agent Engine compatibility.
-- `app/agent_engine_app.py` provides the Agent Engine wrapper.
+| Export | Purpose |
+|---|---|
+| `app/agent.py::root_agent` | ADK root agent. |
+| `app/agent.py::app` | `google.adk.apps.App` for local and Agent Engine usage. |
+| `app/agent_engine_app.py` | Agent Engine wrapper. |
 
-Use the provided Makefile target when ready:
+Deploy when your Google Cloud environment is ready:
 
 ```bash
 make deploy
 ```
 
----
+## Notes
 
-## Demo script
-
-1. Open ADK Web with `make playground`.
-2. Say `hi` to show the conversational coordinator does not run conversion immediately.
-3. Ask `list input files`.
-4. Run `convert input/sample-three-tier-insecure.yaml to a GCP bundle`.
-5. Show AWS → GCP mapping, generated Terraform, and compliance report.
-6. Approve the output writer when prompted.
-7. Show files under `output/`.
-8. Show generated diagrams under `output/diagrams/`.
-9. Run `make clean-output` when you want to reset generated artifacts.
-
----
-
-## Definition of done for the hackathon demo
-
-- Conversational root agent works in ADK Web.
-- Conversion pipeline runs only on explicit conversion requests.
-- Human approval is required before writing files.
-- Output includes Terraform, architecture summary, compliance report, and optional diagrams.
-- Post-approval diagram package can produce manifest JSON, Markdown, PNG, and SVG review artifacts.
-- `make lint` and `make test` pass.
+- Generated outputs are intentionally ignored by git.
+- The README diagram is committed as PNG so the provider icons render reliably.
+- `DSPY_STANDARDS_TRANSFER.md` explains how DSPy could later help evaluate and optimize standards transfer, but DSPy is not required for the current demo.
