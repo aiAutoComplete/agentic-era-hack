@@ -58,6 +58,26 @@ make clean-output
 
 ---
 
+## Architecture at a glance
+
+![CloudBridge ADK flow](docs/assets/cloudbridge-adk-flow.svg)
+
+The diagram is generated with the Python `diagrams` package and Graphviz:
+
+```bash
+make readme-diagram
+```
+
+Graphviz must be installed first because Diagrams uses it for rendering. On macOS:
+
+```bash
+brew install graphviz
+```
+
+The generator follows the Diagrams [installation](https://diagrams.mingrammer.com/docs/getting-started/installation), [diagram guide](https://diagrams.mingrammer.com/docs/guides/diagram), and [GCP node list](https://diagrams.mingrammer.com/docs/nodes/gcp). It uses provider nodes for AWS CloudFormation, Google ADK deployment on Cloud Run, Vertex AI/Gemini, Terraform, and the target GCP services shown in the generated bundle.
+
+---
+
 ## Current agent design
 
 The live ADK app is implemented in:

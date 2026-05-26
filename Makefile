@@ -66,6 +66,10 @@ test:
 demo-diagrams:
 	uv run --with diagrams python scripts/generate_diagrams.py --all
 
+# Generate the committed README ADK flow diagram
+readme-diagram:
+	uv run --with diagrams python scripts/generate_readme_adk_diagram.py
+
 # Remove generated demo artifacts while keeping output/.gitkeep
 clean-output:
 	find output -mindepth 1 ! -name .gitkeep -exec rm -rf {} +
