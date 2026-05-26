@@ -14,7 +14,8 @@ CloudBridge takes an AWS CloudFormation YAML template and produces:
 1. a readable AWS → GCP architecture mapping,
 2. starter Google Cloud Terraform,
 3. an explainable compliance/security report,
-4. optional AWS/GCP/conversion architecture diagrams.
+4. optional AWS/GCP/conversion architecture diagrams,
+5. optional post-approval manifest diagrams for standards review.
 
 This is **not** a full migration platform or production deployment engine. It is a working ADK workflow that generates a first draft for review.
 
@@ -156,6 +157,9 @@ The LLM agents can reason about broader AWS/GCP architecture. The deterministic 
 ```text
 .
 ├── README.md
+├── DSPY_STANDARDS_TRANSFER.md
+├── docs/
+│   └── diagram_pipeline.md
 ├── Team4_CloudBridge_OnePager.docx
 ├── input/
 ├── output/
@@ -168,8 +172,12 @@ The LLM agents can reason about broader AWS/GCP architecture. The deterministic 
 │   └── generate_diagrams.py
 ├── app/
 │   ├── agent.py
+│   ├── architecture_manifest.py
 │   ├── cloudbridge_tools.py
+│   ├── diagram_pipeline.py
+│   ├── diagram_renderers.py
 │   ├── parser.py
+│   ├── parsers/
 │   ├── terraform_gen.py
 │   ├── compliance.py
 │   └── agent_engine_app.py
@@ -185,6 +193,8 @@ app/parser.py             CloudFormation parser used by tests/fallbacks
 app/terraform_gen.py      deterministic starter Terraform helper
 app/compliance.py         deterministic compliance helper
 scripts/generate_diagrams.py optional diagram generator, not part of ADK runtime
+app/diagram_pipeline.py   post-approval manifest + standards diagram package
+docs/diagram_pipeline.md  detailed diagram package workflow
 ```
 
 ---
@@ -215,6 +225,20 @@ output/diagrams/
 ```
 
 This script is intentionally not part of the live ADK agent path.
+
+### Post-approval diagram package
+
+For standards-transfer reviews, CloudBridge can also generate a deterministic diagram package from approved AWS reference templates and approved GCP Terraform:
+
+```bash
+uv run --with diagrams python -m app.diagram_pipeline \
+  --aws-reference path/to/aws/reference/templates \
+  --gcp-terraform path/to/approved/gcp/terraform \
+  --out output/diagrams \
+  --approved
+```
+
+This writes provider manifests, a standards-mapping manifest, Mermaid Markdown diagrams, and PNG/SVG renderings. The required `--approved` flag keeps this as a post-human-review step. See `docs/diagram_pipeline.md`.
 
 ---
 
@@ -297,4 +321,5 @@ make deploy
 - Conversion pipeline runs only on explicit conversion requests.
 - Human approval is required before writing files.
 - Output includes Terraform, architecture summary, compliance report, and optional diagrams.
+- Post-approval diagram package can produce manifest JSON, Markdown, PNG, and SVG review artifacts.
 - `make lint` and `make test` pass.
