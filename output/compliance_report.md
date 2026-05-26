@@ -1,4 +1,0 @@
-Status: PASS
-
-Findings:
-- None
