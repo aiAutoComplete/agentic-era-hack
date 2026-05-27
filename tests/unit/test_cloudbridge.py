@@ -109,6 +109,49 @@ def test_generate_architecture_diagrams_runs_requested_uv_command(
     ]
 
 
+def test_generate_architecture_diagrams_runs_single_requested_template(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        diagram_dir = tmp_path / "diagrams"
+        diagram_dir.mkdir(parents=True)
+        for prefix in ("aws", "gcp", "conversion"):
+            (diagram_dir / f"{prefix}-sample-three-tier-insecure.png").write_bytes(
+                b"png"
+            )
+            (diagram_dir / f"{prefix}-sample-three-tier-insecure.svg").write_text(
+                "<svg />"
+            )
+        (diagram_dir / "README.md").write_text("# Diagrams")
+
+        class Result:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("app.cloudbridge_tools.OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr("app.cloudbridge_tools.subprocess.run", fake_run)
+
+    result = generate_architecture_diagrams("input/sample-three-tier-insecure.yaml")
+
+    assert result["status"] == "generated"
+    assert calls[0][0] == [
+        "uv",
+        "run",
+        "--with",
+        "diagrams",
+        "python",
+        "scripts/generate_diagrams.py",
+        "--clean",
+        "input/sample-three-tier-insecure.yaml",
+    ]
+
+
 def test_write_generated_output_files_requires_approval(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("app.cloudbridge_tools.OUTPUT_DIR", tmp_path)
     terraform_bundle = """```main.tf
@@ -146,13 +189,16 @@ output "network" { value = "main" }
 
 
 def test_stage_then_commit_writes_and_verifies_outputs(tmp_path, monkeypatch) -> None:
+    diagram_calls = []
+
     monkeypatch.setattr("app.cloudbridge_tools.OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
         "app.cloudbridge_tools.PENDING_OUTPUT_PATH", tmp_path / "pending.json"
     )
     monkeypatch.setattr(
         "app.cloudbridge_tools.generate_architecture_diagrams",
-        lambda: {"status": "generated", "count": 3, "files": ["output/diagrams/a.png"]},
+        lambda source_template=None: diagram_calls.append(source_template)
+        or {"status": "generated", "count": 3, "files": ["output/diagrams/a.png"]},
     )
     terraform_bundle = """```main.tf
 resource "google_compute_network" "main" {}
@@ -167,12 +213,18 @@ variable "project_id" { type = string }
 output "network" { value = "main" }
 ```"""
 
-    staged = stage_output_package(terraform_bundle, "# Compliance", "# Plan")
+    staged = stage_output_package(
+        terraform_bundle,
+        "# Compliance",
+        "# Plan",
+        source_template="input/sample-three-tier-insecure.yaml",
+    )
     assert staged["status"] == "pending_approval"
     assert staged["approval_required"] == "yes"
 
     result = commit_staged_output_package("yes")
     assert result["status"] == "complete"
     assert result["output_verification"]["status"] == "verified"
+    assert diagram_calls == ["input/sample-three-tier-insecure.yaml"]
     assert (tmp_path / "main.tf").exists()
     assert (tmp_path / "compliance_report.md").exists()
