@@ -250,7 +250,7 @@ Inputs:
 {compliance_report}
 </compliance_report>
 
-Call stage_output_package with terraform_bundle, compliance_report, and gcp_plan.
+Call stage_output_package with terraform_bundle, compliance_report, gcp_plan, and the source_template path the user asked to convert, such as input/sample-three-tier-insecure.yaml.
 Do not write output files yet.
 Tell the user exactly: Reply yes to write output files, create diagrams, verify everything, and complete the CloudBridge run.
 Do not say the run is complete yet.

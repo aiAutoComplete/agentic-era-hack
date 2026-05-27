@@ -201,6 +201,7 @@ my_env.tfvars
 # CloudBridge generated outputs
 /output/*
 !/output/.gitkeep
+.cloudbridge_*.json
 
 # A2A Inspector
 tools/a2a-inspector/

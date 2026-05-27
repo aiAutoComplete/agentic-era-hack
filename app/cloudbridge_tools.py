@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INPUT_DIR = REPO_ROOT / "input"
 OUTPUT_DIR = REPO_ROOT / "output"
 PENDING_OUTPUT_PATH = REPO_ROOT / ".cloudbridge_pending_outputs.json"
+SELECTED_INPUT_PATH = REPO_ROOT / ".cloudbridge_selected_input.json"
 EXPECTED_OUTPUT_FILES = (
     "main.tf",
     "variables.tf",
@@ -70,6 +71,58 @@ def _read_template_or_path(template_or_path: str) -> str:
     return template_or_path
 
 
+def _relative_repo_path(path: Path) -> str:
+    return str(path.relative_to(REPO_ROOT))
+
+
+def _normalize_input_template_path(source_template: str | None) -> str | None:
+    if not source_template:
+        return None
+    candidate = source_template.strip()
+    if not candidate:
+        return None
+    path = Path(candidate)
+    if not path.is_absolute() and len(path.parts) == 1:
+        path = INPUT_DIR / path
+    safe_path = _safe_project_path(str(path))
+    if not safe_path.is_file() or not _is_inside(safe_path, INPUT_DIR):
+        raise ValueError("source_template must be a readable file under input/.")
+    if safe_path.suffix.lower() not in {".yaml", ".yml", ".json"}:
+        raise ValueError("source_template must be a YAML or JSON template.")
+    return _relative_repo_path(safe_path)
+
+
+def _record_selected_input(path: Path) -> None:
+    if path.is_file() and _is_inside(path, INPUT_DIR):
+        SELECTED_INPUT_PATH.write_text(
+            json.dumps({"source_template": _relative_repo_path(path)}, indent=2)
+        )
+
+
+def _last_selected_input_template() -> str | None:
+    if not SELECTED_INPUT_PATH.exists():
+        return None
+    try:
+        payload = json.loads(SELECTED_INPUT_PATH.read_text())
+    except json.JSONDecodeError:
+        return None
+    return _normalize_input_template_path(payload.get("source_template"))
+
+
+def _clear_generated_diagram_dir(diagram_dir: Path) -> None:
+    if not diagram_dir.exists():
+        return
+    for path in diagram_dir.iterdir():
+        if not path.is_file():
+            continue
+        is_generated_diagram = (
+            path.suffix.lower() in {".png", ".svg"}
+            and path.name.startswith(("aws-", "gcp-", "conversion-"))
+        )
+        if is_generated_diagram or path.name == "README.md":
+            path.unlink()
+
+
 def _package_output(
     bundle: TerraformBundle, parsed: ResourceList | None = None
 ) -> FinalPackage:
@@ -119,6 +172,7 @@ def read_project_file(path: str) -> str:
     safe_path = _safe_project_path(path)
     if not safe_path.exists() or not safe_path.is_file():
         raise FileNotFoundError(f"No readable CloudBridge file at {path!r}.")
+    _record_selected_input(safe_path)
     return safe_path.read_text()
 
 
@@ -379,6 +433,7 @@ def stage_output_package(
     terraform_bundle: str,
     compliance_report: str,
     gcp_plan: str = "",
+    source_template: str | None = None,
 ) -> dict[str, Any]:
     """Stage generated outputs and ask the user to type exactly 'yes'."""
     files = _prepare_generated_output_files(
@@ -386,23 +441,37 @@ def stage_output_package(
     )
     if files.get("status") == "not_prepared":
         return files
-    PENDING_OUTPUT_PATH.write_text(json.dumps({"files": files}, indent=2))
+    selected_source = _normalize_input_template_path(
+        source_template
+    ) or _last_selected_input_template()
+    pending_payload: dict[str, Any] = {"files": files}
+    if selected_source:
+        pending_payload["source_template"] = selected_source
+    PENDING_OUTPUT_PATH.write_text(json.dumps(pending_payload, indent=2))
     return {
         "status": "pending_approval",
         "approval_required": "yes",
         "expected_output_files": [f"output/{name}" for name in EXPECTED_OUTPUT_FILES],
+        "source_template": selected_source,
         "message": "Reply exactly 'yes' to write files, generate diagrams, verify artifacts, and complete the run.",
     }
 
 
-def generate_architecture_diagrams() -> dict[str, Any]:
-    """Generate AWS, GCP, and conversion diagrams for every input template."""
+def generate_architecture_diagrams(
+    source_template: str | None = None,
+) -> dict[str, Any]:
+    """Generate AWS, GCP, and conversion diagrams for a requested template."""
     script = REPO_ROOT / "scripts" / "generate_diagrams.py"
     if not script.exists():
         return {
             "status": "not_generated",
             "reason": "scripts/generate_diagrams.py not found",
         }
+
+    selected_source = _normalize_input_template_path(source_template)
+    diagram_args = ["--all"] if selected_source is None else ["--clean", selected_source]
+    if selected_source is not None:
+        _clear_generated_diagram_dir(OUTPUT_DIR / "diagrams")
 
     try:
         result = subprocess.run(
@@ -413,7 +482,7 @@ def generate_architecture_diagrams() -> dict[str, Any]:
                 "diagrams",
                 "python",
                 str(script.relative_to(REPO_ROOT)),
-                "--all",
+                *diagram_args,
             ],
             cwd=REPO_ROOT,
             capture_output=True,
@@ -430,7 +499,7 @@ def generate_architecture_diagrams() -> dict[str, Any]:
             "reason": (result.stderr or result.stdout)[-1200:],
         }
 
-    verification = verify_diagram_files()
+    verification = verify_diagram_files(selected_source)
     if verification["status"] != "verified":
         return {
             "status": "not_generated",
@@ -447,7 +516,7 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
-def verify_diagram_files() -> dict[str, Any]:
+def verify_diagram_files(source_template: str | None = None) -> dict[str, Any]:
     """Verify generated diagram artifacts exist and are non-empty."""
     diagram_dir = OUTPUT_DIR / "diagrams"
     paths = sorted(
@@ -456,6 +525,29 @@ def verify_diagram_files() -> dict[str, Any]:
         if path.is_file() and path.stat().st_size > 0
     )
     files = [_display_path(path) for path in paths]
+    selected_source = _normalize_input_template_path(source_template)
+    if selected_source is not None:
+        stem = Path(selected_source).stem
+        expected = [
+            diagram_dir / f"{prefix}-{stem}{suffix}"
+            for prefix in ("aws", "gcp", "conversion")
+            for suffix in (".png", ".svg")
+        ]
+        expected.append(diagram_dir / "README.md")
+        missing = [
+            _display_path(path)
+            for path in expected
+            if not path.is_file() or path.stat().st_size <= 0
+        ]
+        if missing:
+            return {
+                "status": "failed",
+                "reason": f"Expected diagram artifacts for {selected_source}.",
+                "missing": missing,
+                "files": files,
+            }
+        return {"status": "verified", "count": len(files), "files": files}
+
     has_png = any(path.suffix == ".png" for path in paths)
     has_svg = any(path.suffix == ".svg" for path in paths)
     has_readme = any(path.name == "README.md" for path in paths)
@@ -489,7 +581,7 @@ def commit_staged_output_package(approval: str) -> dict[str, Any]:
             "diagrams": {"status": "skipped"},
         }
 
-    diagram_result = generate_architecture_diagrams()
+    diagram_result = generate_architecture_diagrams(payload.get("source_template"))
     if diagram_result.get("status") != "generated":
         return {
             "status": "failed",

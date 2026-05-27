@@ -52,6 +52,7 @@ from app.parser import parse_cfn
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INPUT_DIR = REPO_ROOT / "input"
 OUTPUT_DIR = REPO_ROOT / "output" / "diagrams"
+GENERATED_DIAGRAM_PATTERN = re.compile(r"^(aws|gcp|conversion)-.+\.(png|svg)$")
 
 GRAPH_ATTR = {
     "bgcolor": "#ffffff",
@@ -373,6 +374,16 @@ def generate(paths: list[Path], out_dir: Path) -> list[Path]:
     return generated
 
 
+def clean_generated_outputs(out_dir: Path) -> None:
+    if not out_dir.exists():
+        return
+    for path in out_dir.iterdir():
+        if path.is_file() and (
+            GENERATED_DIAGRAM_PATTERN.match(path.name) or path.name == "README.md"
+        ):
+            path.unlink()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate CloudBridge AWS/GCP architecture diagrams."
@@ -394,6 +405,11 @@ def parse_args() -> argparse.Namespace:
         default=OUTPUT_DIR,
         help="Output directory. Default: output/diagrams",
     )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Remove previously generated diagram files from the output directory first.",
+    )
     return parser.parse_args()
 
 
@@ -413,6 +429,9 @@ def main() -> None:
     for template in templates:
         if not template.exists():
             raise SystemExit(f"Template not found: {template}")
+
+    if args.clean:
+        clean_generated_outputs(args.out_dir)
 
     generated = generate(templates, args.out_dir)
     print("Generated diagrams:")
